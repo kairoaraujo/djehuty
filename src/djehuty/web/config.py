@@ -101,6 +101,7 @@ class RuntimeConfiguration:  # pylint: disable=too-few-public-methods
         self.ssi_psk                     = None
         self.allow_full_embargo         = True
         self.file_deposit_notice         = None
+        self.api_service                 = "new"
         self.menu                        = []
         self.colors                      = {
             "primary-color":            "#f49120",

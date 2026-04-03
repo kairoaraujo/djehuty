@@ -789,6 +789,10 @@ def read_configuration_file (server, config_file, logger, config_files):
             ssi_psk = ssi_psk.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
             config.ssi_psk = ssi_psk
 
+        api_service = config_value (xml_root, "api-service")
+        if api_service in ("new", "legacy"):
+            config.api_service = api_service
+
         enable_query_audit_log = xml_root.find ("enable-query-audit-log")
         if enable_query_audit_log is not None:
             transactions_directory = enable_query_audit_log.attrib.get("transactions-directory")
@@ -1376,7 +1380,37 @@ def main (config_file=None, run_internal_server=True, initialize=True,
             if config.static_cache_root is not None:
                 server.create_static_error_pages()
 
-        run_simple (config.address, config.port, server,
+        wsgi_app = server
+        if config.api_service == "new":
+            try:
+                from djehuty.api import create_app as create_api_app
+                from a2wsgi import ASGIMiddleware
+                fastapi_app = create_api_app(server.db)
+                api_wsgi = ASGIMiddleware(fastapi_app)
+
+                class ApiDispatcher:
+                    """Routes /v2/ and /v3/ to FastAPI, everything else to legacy."""
+                    def __init__(self, legacy, api):
+                        self.legacy = legacy
+                        self.api = api
+                    def __call__(self, environ, start_response):
+                        path = environ.get("PATH_INFO", "")
+                        if (path.startswith("/v2/") or path.startswith("/v3/")
+                            or path.startswith("/api/")):
+                            return self.api(environ, start_response)
+                        return self.legacy(environ, start_response)
+
+                wsgi_app = ApiDispatcher(server, api_wsgi)
+                logger.info ("API service:             FastAPI (new)")
+            except ImportError as error:
+                logger.warning ("FastAPI not available (%s), falling back to legacy API.", error)
+        else:
+            logger.info ("API service:             Werkzeug (legacy)")
+            logger.warning ("The legacy API (Werkzeug) is deprecated and will be "
+                            "removed after 2027-01-01. Set <api-service>new</api-service> "
+                            "in the configuration file to switch to the FastAPI implementation.")
+
+        run_simple (config.address, config.port, wsgi_app,
                     threaded=(config.maximum_workers <= 1),
                     processes=config.maximum_workers,
                     extra_files=list(config_files),

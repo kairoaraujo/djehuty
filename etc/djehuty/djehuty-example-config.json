@@ -38,6 +38,7 @@
     "live-reload": "1",
     "debug-mode": "1",
     "production": "0",
+    "api-service": "new",
     "show-portal-summary": "1",
     "show-institutions": "1",
     "show-science-categories": "1",

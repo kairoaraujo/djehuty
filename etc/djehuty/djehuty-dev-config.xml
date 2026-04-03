@@ -39,6 +39,7 @@
   <live-reload>1</live-reload>
   <debug-mode>1</debug-mode>
   <production>0</production>
+  <api-service>new</api-service>
   <allow-crawlers>0</allow-crawlers>
   <show-portal-summary>1</show-portal-summary>
   <show-institutions>1</show-institutions>

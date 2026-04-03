@@ -51,6 +51,10 @@
   <!-- <log-file>/var/log/djehuty.log</log-file> -->
   <debug-mode>1</debug-mode>
   <production>0</production>
+
+  <!-- API implementation: "legacy" (Werkzeug, deprecated — removed after 2027-01-01)
+       or "new" (FastAPI with input validation and OpenAPI docs at /api/docs) -->
+  <api-service>new</api-service>
   <show-portal-summary>1</show-portal-summary>
   <show-institutions>1</show-institutions>
   <show-science-categories>1</show-science-categories>
