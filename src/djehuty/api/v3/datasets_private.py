@@ -5,10 +5,23 @@ from fastapi.responses import JSONResponse
 
 from djehuty.web import formatter
 from djehuty.web.config import config
-from djehuty.api.dependencies import get_db, require_auth
+from djehuty.api.dependencies import get_db, get_current_account, require_auth
 from djehuty.api.exceptions import NotFoundError, ForbiddenError, InvalidInputError
 
 router = APIRouter(tags=["Dataset Management"])
+
+
+def _resolve_any_dataset(db, dataset_id, account=None):
+    """Resolve a dataset by ID/UUID, checking auth if available."""
+    account_uuid = account["uuid"] if account else None
+    try:
+        try:
+            numeric_id = int(dataset_id)
+            return db.datasets(dataset_id=numeric_id, account_uuid=account_uuid, is_published=None, is_latest=None, limit=1)[0]
+        except (ValueError, TypeError):
+            return db.datasets(container_uuid=str(dataset_id), account_uuid=account_uuid, is_published=None, is_latest=None, limit=1)[0]
+    except (IndexError, AttributeError):
+        raise NotFoundError()
 
 
 def _resolve_dataset(db, dataset_id, account_uuid):
@@ -114,23 +127,65 @@ def decline_dataset(
 
 
 @router.get("/datasets/{dataset_id}/references", summary="List dataset references", tags=["Dataset Metadata"])
-def list_references(dataset_id: str, db=Depends(get_db)):
-    try:
-        dataset = db.datasets(container_uuid=str(dataset_id), is_latest=True)[0]
-    except (IndexError, AttributeError):
-        raise NotFoundError()
+def list_references(dataset_id: str, db=Depends(get_db), account: dict | None = Depends(get_current_account)):
+    dataset = _resolve_any_dataset(db, dataset_id, account)
     refs = db.references(item_uri=dataset["uri"])
     return JSONResponse(content=[formatter.format_reference_record(r) for r in refs])
 
 
+@router.post("/datasets/{dataset_id}/references", summary="Add references", tags=["Dataset Metadata"])
+def add_references(dataset_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
+    dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+    new_refs = body.get("references", [])
+    existing = db.references(item_uri=dataset["uri"], account_uuid=account["uuid"])
+    existing_urls = [r.get("url", "") for r in existing]
+    combined = existing_urls + [r.get("url", r) if isinstance(r, dict) else r for r in new_refs if (r.get("url", r) if isinstance(r, dict) else r) not in existing_urls]
+    db.update_item_list(dataset["uuid"], account["uuid"], combined, "references")
+    return Response(status_code=205)
+
+
+@router.delete("/datasets/{dataset_id}/references", summary="Delete a reference", tags=["Dataset Metadata"])
+def delete_reference(dataset_id: str, url: str = Query(..., max_length=1024), account=Depends(require_auth), db=Depends(get_db)):
+    from requests.utils import unquote
+    dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+    decoded_url = unquote(url)
+    existing = db.references(item_uri=dataset["uri"], account_uuid=account["uuid"])
+    urls = [r.get("url", "") for r in existing]
+    if decoded_url in urls:
+        urls.remove(decoded_url)
+        db.update_item_list(dataset["uuid"], account["uuid"], urls, "references")
+    return Response(status_code=204)
+
+
 @router.get("/datasets/{dataset_id}/tags", summary="List dataset tags", tags=["Dataset Metadata"])
-def list_tags(dataset_id: str, db=Depends(get_db)):
-    try:
-        dataset = db.datasets(container_uuid=str(dataset_id), is_latest=True)[0]
-    except (IndexError, AttributeError):
-        raise NotFoundError()
+def list_tags(dataset_id: str, db=Depends(get_db), account: dict | None = Depends(get_current_account)):
+    dataset = _resolve_any_dataset(db, dataset_id, account)
     tags = db.tags(item_uri=dataset["uri"])
     return JSONResponse(content=[formatter.format_tag_record(t) for t in tags])
+
+
+@router.post("/datasets/{dataset_id}/tags", summary="Add tags", tags=["Dataset Metadata"])
+def add_tags(dataset_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
+    dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+    new_tags = body.get("tags", [])
+    existing = db.tags(item_uri=dataset["uri"], account_uuid=account["uuid"])
+    existing_values = [formatter.format_tag_record(t) for t in existing]
+    combined = list(dict.fromkeys(existing_values + new_tags))  # deduplicate preserving order
+    db.update_item_list(dataset["uuid"], account["uuid"], combined, "tags")
+    return Response(status_code=205)
+
+
+@router.delete("/datasets/{dataset_id}/tags", summary="Delete a tag", tags=["Dataset Metadata"])
+def delete_tag(dataset_id: str, tag: str = Query(..., max_length=1024), account=Depends(require_auth), db=Depends(get_db)):
+    from requests.utils import unquote
+    dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+    decoded_tag = unquote(tag)
+    existing = db.tags(item_uri=dataset["uri"], account_uuid=account["uuid"])
+    tag_values = [formatter.format_tag_record(t) for t in existing]
+    if decoded_tag in tag_values:
+        tag_values.remove(decoded_tag)
+        db.update_item_list(dataset["uuid"], account["uuid"], tag_values, "tags")
+    return Response(status_code=204)
 
 
 @router.get("/datasets/{dataset_id}/image-files", summary="List image files", tags=["Dataset Files"])
@@ -173,7 +228,7 @@ def update_collaborator(
 @router.delete("/datasets/{container_uuid}/collaborators/{collaborator_uuid}", summary="Remove collaborator", tags=["Collaborators"])
 def delete_collaborator(container_uuid: str, collaborator_uuid: str, account=Depends(require_auth), db=Depends(get_db)):
     db.delete_collaborator(container_uuid=container_uuid, collaborator_uuid=collaborator_uuid)
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)
 
 
 # --- Authors (v3 format) ---

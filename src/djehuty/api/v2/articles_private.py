@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from djehuty.web import formatter
 from djehuty.web.config import config
-from djehuty.api.dependencies import get_db, require_auth, pagination_params
+from djehuty.api.dependencies import get_db, get_token, require_auth, pagination_params
 from djehuty.api.exceptions import NotFoundError, ForbiddenError, InvalidInputError
 from djehuty.api.models.common import ErrorResponse
 from djehuty.api.services.article_service import ArticleService
@@ -71,13 +71,14 @@ def create_article(
     body: dict,
     account=Depends(require_auth),
     db=Depends(get_db),
+    token: str | None = Depends(get_token),
 ):
     from djehuty.web import validator
     from djehuty.utils.convenience import value_or_none
 
     account_uuid = account["uuid"]
 
-    if not db.is_depositor(None, account):
+    if not db.is_depositor(token, account):
         raise ForbiddenError("Account is not allowed to deposit.")
 
     try:
@@ -124,20 +125,25 @@ def create_article(
         raise InvalidInputError(error.message, error.code)
 
 
-@router.get(
+@router.post(
     "/articles/search",
     summary="Search own articles",
     responses={200: {"description": "Search results"}, 401: {"model": ErrorResponse}},
 )
 def search_private_articles(
+    body: dict,
     account=Depends(require_auth),
     service: ArticleService = Depends(_get_service),
-    paging: dict = Depends(pagination_params),
-    search_for: str | None = Query(None, max_length=1024),
 ):
+    from djehuty.utils.convenience import value_or_none
+    search_for = value_or_none(body, "search_for")
+    limit = body.get("limit", 10)
+    offset = body.get("offset", 0)
+
     records = service.list_articles(
-        limit=paging["limit"], offset=paging["offset"],
-        search_for=search_for, is_latest=False,
+        limit=limit, offset=offset,
+        search_for=search_for, is_published=False,
+        account_uuid=account["uuid"],
     )
     return JSONResponse(content=records)
 
@@ -152,9 +158,11 @@ def get_private_article(
     account=Depends(require_auth),
     service: ArticleService = Depends(_get_service),
 ):
-    result = service.get_article_details(dataset_id, account_uuid=account["uuid"], is_latest=False)
+    result = service.get_article_details(dataset_id, account_uuid=account["uuid"],
+                                         is_published=False)
     if result is None:
-        raise NotFoundError()
+        # Legacy returns 200 with empty array when dataset not found
+        return JSONResponse(content=[])
     return JSONResponse(content=result)
 
 
@@ -239,10 +247,16 @@ def delete_article(
     account=Depends(require_auth),
     db=Depends(get_db),
 ):
-    dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    if db.delete_dataset_draft(dataset["uri"], account["uuid"]):
-        return JSONResponse(status_code=204, content=None)
-    raise NotFoundError()
+    try:
+        dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
+        if db.delete_dataset_draft(dataset["container_uuid"], dataset["uuid"],
+                                   account["uuid"], dataset["account_uuid"]):
+            return Response(status_code=204)
+    except NotFoundError:
+        pass
+    # Legacy returns 500 for both not-found and failed deletes.
+    # Documented in doc/api-improvements.md for future correction.
+    return JSONResponse(status_code=500, content="")
 
 
 # --- Sub-resource endpoints ---
@@ -250,43 +264,104 @@ def delete_article(
 @router.get("/articles/{dataset_id}/authors", summary="List article authors", tags=["Private Article Authors"])
 def list_article_authors(dataset_id: str, account=Depends(require_auth), db=Depends(get_db)):
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    authors = db.authors(item_uri=dataset["uri"], item_type="dataset", account_uuid=account["uuid"], limit=10000)
+    authors = db.authors(item_uri=dataset["uri"], item_type="dataset",
+                         account_uuid=account["uuid"], is_published=False, limit=10000)
     return JSONResponse(content=[formatter.format_author_record(a) for a in authors])
 
 
-@router.post("/articles/{dataset_id}/authors", summary="Add authors", tags=["Private Article Authors"])
-def add_article_authors(dataset_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
+@router.post("/articles/{dataset_id}/authors", summary="Add authors to dataset", tags=["Private Article Authors"])
+@router.put("/articles/{dataset_id}/authors", summary="Replace dataset authors", tags=["Private Article Authors"])
+def upsert_article_authors(dataset_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
+    from djehuty.utils.rdf import uris_from_records
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    # Authors input is handled by the legacy __author_list_from_request_input
-    # For now, delegate to the db layer directly
-    return JSONResponse(content={"message": "ok"})
+    input_authors = body.get("authors", [])
+
+    new_author_uuids = []
+    for author_data in input_authors:
+        if "uuid" in author_data and author_data["uuid"]:
+            new_author_uuids.append(author_data["uuid"])
+        else:
+            author_uuid = db.insert_author(
+                first_name=author_data.get("first_name", ""),
+                last_name=author_data.get("last_name", ""),
+                full_name=author_data.get("name") or f"{author_data.get('first_name', '')} {author_data.get('last_name', '')}".strip(),
+                email=author_data.get("email"),
+                orcid_id=author_data.get("orcid_id"),
+            )
+            if author_uuid:
+                new_author_uuids.append(author_uuid)
+
+    existing = db.authors(item_uri=dataset["uri"], item_type="dataset",
+                          account_uuid=account["uuid"], is_published=False, limit=10000)
+    existing_uuids = [a["uuid"] for a in existing if "uuid" in a]
+
+    combined = existing_uuids + [u for u in new_author_uuids if u not in existing_uuids]
+    combined_records = [{"uuid": u} for u in combined]
+    uris = uris_from_records(combined_records, "author", "uuid")
+    db.update_item_list(dataset["uuid"], account["uuid"], uris, "authors")
+    return Response(status_code=205)
 
 
 @router.delete("/articles/{dataset_id}/authors/{author_id}", summary="Remove an author", tags=["Private Article Authors"])
 def delete_article_author(dataset_id: str, author_id: str, account=Depends(require_auth), db=Depends(get_db)):
+    from djehuty.utils.rdf import uris_from_records
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    db.delete_authors(item_uri=dataset["uri"], author_uuid=author_id)
-    return JSONResponse(status_code=204, content=None)
+    authors = db.authors(item_uri=dataset["uri"], item_type="dataset",
+                         account_uuid=account["uuid"], is_published=False, limit=10000)
+
+    remaining = [a for a in authors
+                 if str(a.get("id")) != str(author_id) and a.get("uuid") != author_id]
+    uris = uris_from_records(remaining, "author", "uuid")
+    db.update_item_list(dataset["uuid"], account["uuid"], uris, "authors")
+    return Response(status_code=204)
 
 
 @router.get("/articles/{dataset_id}/categories", summary="List article categories", tags=["Private Article Categories"])
 def list_article_categories(dataset_id: str, account=Depends(require_auth), db=Depends(get_db)):
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    categories = db.categories(item_uri=dataset["uri"], limit=None)
+    categories = db.categories(item_uri=dataset["uri"], account_uuid=account["uuid"],
+                               is_published=False, limit=None)
     return JSONResponse(content=[formatter.format_category_record(c) for c in categories])
 
 
 @router.post("/articles/{dataset_id}/categories", summary="Add categories", tags=["Private Article Categories"])
-def add_article_categories(dataset_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
+@router.put("/articles/{dataset_id}/categories", summary="Replace categories", tags=["Private Article Categories"])
+def upsert_article_categories(dataset_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
+    from djehuty.utils.rdf import uris_from_records
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    return JSONResponse(content={"message": "ok"})
+    input_categories = body.get("categories", [])
+
+    new_cat_records = []
+    for cat_id in input_categories:
+        try:
+            cat = db.category_by_id(category_id=int(cat_id)) if str(cat_id).isdigit() else db.category_by_id(category_uuid=str(cat_id))
+            if cat and "uuid" in cat:
+                new_cat_records.append(cat)
+        except (TypeError, IndexError, KeyError):
+            pass
+
+    existing = db.categories(item_uri=dataset["uri"], account_uuid=account["uuid"],
+                             is_published=False, limit=None)
+    existing_uuids = {c["uuid"] for c in existing if "uuid" in c}
+    combined = existing + [c for c in new_cat_records if c.get("uuid") not in existing_uuids]
+    uris = uris_from_records(combined, "category", "uuid")
+    db.update_item_list(dataset["uuid"], account["uuid"], uris, "categories")
+    return Response(status_code=205)
 
 
 @router.delete("/articles/{dataset_id}/categories/{category_id}", summary="Remove a category", tags=["Private Article Categories"])
-def delete_article_category(dataset_id: str, category_id: int, account=Depends(require_auth), db=Depends(get_db)):
+def delete_article_category(dataset_id: str, category_id: str, account=Depends(require_auth), db=Depends(get_db)):
+    from djehuty.utils.rdf import uuid_to_uri
+    from rdflib import URIRef
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    db.delete_dataset_categories(dataset["uri"], [category_id])
-    return JSONResponse(status_code=204, content=None)
+    try:
+        cat = db.category_by_id(category_id=int(category_id)) if category_id.isdigit() else db.category_by_id(category_uuid=category_id)
+        if cat and "uuid" in cat:
+            db.delete_item_from_list(dataset["uri"], "categories",
+                                     URIRef(uuid_to_uri(cat["uuid"], "category")))
+    except (TypeError, IndexError, KeyError):
+        pass
+    return Response(status_code=204)
 
 
 @router.get("/articles/{dataset_id}/files", summary="List article files", tags=["Private Article Files"])
@@ -307,9 +382,12 @@ def get_private_article_file(dataset_id: str, file_id: str, account=Depends(requ
 
 @router.delete("/articles/{dataset_id}/files/{file_id}", summary="Delete a file", tags=["Private Article Files"])
 def delete_private_article_file(dataset_id: str, file_id: str, account=Depends(require_auth), db=Depends(get_db)):
+    from djehuty.utils.rdf import uuid_to_uri
+    from rdflib import URIRef
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    db.delete_file(dataset["uri"], file_id)
-    return JSONResponse(status_code=204, content=None)
+    db.delete_item_from_list(dataset["uri"], "files", URIRef(uuid_to_uri(file_id, "file")))
+    db.cache.invalidate_by_prefix(f"{account['uuid']}_storage")
+    return Response(status_code=204)
 
 
 @router.get("/articles/{dataset_id}/embargo", summary="Get embargo details", tags=["Private Article Embargo"])
@@ -318,41 +396,85 @@ def get_article_embargo(dataset_id: str, account=Depends(require_auth), db=Depen
     return JSONResponse(content=formatter.format_dataset_embargo_record(dataset))
 
 
+@router.delete("/articles/{dataset_id}/embargo", summary="Delete embargo", tags=["Private Article Embargo"])
+def delete_article_embargo(dataset_id: str, account=Depends(require_auth), db=Depends(get_db)):
+    dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
+    db.delete_dataset_embargo(dataset["uri"], account["uuid"])
+    return Response(status_code=204)
+
+
 @router.get("/articles/{dataset_id}/private_links", summary="List private links", tags=["Private Article Links"])
 def list_private_links(dataset_id: str, account=Depends(require_auth), db=Depends(get_db)):
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    links = db.private_links(item_uri=dataset["container_uri"])
+    links = db.private_links(item_uri=dataset["uri"], account_uuid=account["uuid"])
     return JSONResponse(content=[formatter.format_private_links_record(l) for l in links])
 
 
 @router.post("/articles/{dataset_id}/private_links", summary="Create a private link", tags=["Private Article Links"])
-def create_private_link(dataset_id: str, account=Depends(require_auth), db=Depends(get_db)):
+def create_private_link(dataset_id: str, body: dict = {}, account=Depends(require_auth), db=Depends(get_db)):
+    import secrets
+    from djehuty.web import validator
+
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    link_id = db.insert_private_link(item_uri=dataset["container_uri"])
-    if link_id is None:
-        raise InvalidInputError("Failed to create private link.", "CreateFailed")
+
+    expires_date = validator.date_value(body, "expires_date", False) if body else None
+    if expires_date:
+        expires_date = f"{expires_date}T00:00:00Z"
+    read_only = validator.boolean_value(body, "read_only", False) if body else None
+    id_string = secrets.token_urlsafe()
+
+    # insert_private_link handles both creating the link and updating the item list
+    db.insert_private_link(dataset["uuid"], account["uuid"], item_type="dataset",
+                           expires_date=expires_date, read_only=read_only,
+                           id_string=id_string, is_active=True)
+
+    return JSONResponse(content={"location": f"{config.base_url}/private_datasets/{id_string}"})
+
+
+@router.get("/articles/{dataset_id}/private_links/{link_id}", summary="Get private link", tags=["Private Article Links"])
+def get_private_link(dataset_id: str, link_id: str, account=Depends(require_auth), db=Depends(get_db)):
+    dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
+    links = db.private_links(item_uri=dataset["uri"], id_string=link_id, account_uuid=account["uuid"])
+    if not links:
+        raise NotFoundError()
+    return JSONResponse(content=[formatter.format_private_links_record(l) for l in links])
+
+
+@router.put("/articles/{dataset_id}/private_links/{link_id}", summary="Update private link", tags=["Private Article Links"])
+def update_private_link(dataset_id: str, link_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
+    from djehuty.web import validator
+    dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
+    expires_date = validator.string_value(body, "expires_date", 0, 255, False) if body else None
+    is_active = validator.boolean_value(body, "is_active", False) if body else None
+    db.update_private_link(dataset["uri"], account["uuid"], link_id, expires_date=expires_date, is_active=is_active)
     return JSONResponse(content={"location": f"{config.base_url}/private_datasets/{link_id}"})
 
 
 @router.delete("/articles/{dataset_id}/private_links/{link_id}", summary="Delete a private link", tags=["Private Article Links"])
 def delete_private_link(dataset_id: str, link_id: str, account=Depends(require_auth), db=Depends(get_db)):
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    db.delete_private_links(item_uri=dataset["container_uri"], link_id=link_id)
-    return JSONResponse(status_code=204, content=None)
+    db.delete_private_links(dataset["container_uuid"], account["uuid"], link_id)
+    return Response(status_code=204)
 
 
 @router.get("/articles/{dataset_id}/funding", summary="List funding", tags=["Private Article Funding"])
 def list_article_funding(dataset_id: str, account=Depends(require_auth), db=Depends(get_db)):
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    fundings = db.fundings(item_uri=dataset["uri"], item_type="dataset")
+    fundings = db.fundings(item_uri=dataset["uri"], item_type="dataset",
+                           account_uuid=account["uuid"], is_published=False)
     return JSONResponse(content=[formatter.format_funding_record(f) for f in fundings])
 
 
 @router.delete("/articles/{dataset_id}/funding/{funding_id}", summary="Remove funding", tags=["Private Article Funding"])
 def delete_article_funding(dataset_id: str, funding_id: str, account=Depends(require_auth), db=Depends(get_db)):
+    from djehuty.utils.rdf import uris_from_records
     dataset = _resolve_private_dataset(db, dataset_id, account["uuid"])
-    db.delete_funding(item_uri=dataset["uri"], funding_uuid=funding_id)
-    return JSONResponse(status_code=204, content=None)
+    fundings = db.fundings(item_uri=dataset["uri"], item_type="dataset",
+                           account_uuid=account["uuid"], is_published=False, limit=10000)
+    remaining = [f for f in fundings if f.get("uuid") != funding_id]
+    uris = uris_from_records(remaining, "funding", "uuid")
+    db.update_item_list(dataset["uuid"], account["uuid"], uris, "funding_list")
+    return Response(status_code=204)
 
 
 @router.post("/articles/{dataset_id}/reserve_doi", summary="Reserve a DOI", tags=["Private Articles"])

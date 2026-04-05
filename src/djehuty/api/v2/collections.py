@@ -1,6 +1,6 @@
 """Public and private collection endpoints for the v2 API."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import JSONResponse
 
 from djehuty.web import formatter
@@ -155,7 +155,7 @@ def list_collection_authors(collection_id: str, account=Depends(require_auth), d
 def delete_collection_author(collection_id: str, author_id: str, account=Depends(require_auth), db=Depends(get_db)):
     collection = _resolve_private_collection(db, collection_id, account["uuid"])
     db.delete_authors(item_uri=collection["uri"], author_uuid=author_id)
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)
 
 
 @router.get("/account/collections/{collection_id}/categories", summary="List collection categories", tags=["Private Collection Categories"])
@@ -169,7 +169,7 @@ def list_collection_categories(collection_id: str, account=Depends(require_auth)
 def delete_collection_category(collection_id: str, category_id: int, account=Depends(require_auth), db=Depends(get_db)):
     collection = _resolve_private_collection(db, collection_id, account["uuid"])
     db.delete_collection_categories(collection["uri"], [category_id])
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)
 
 
 @router.get("/account/collections/{collection_id}/articles", summary="List collection articles (private)", tags=["Private Collection Articles"])
@@ -183,7 +183,7 @@ def list_private_collection_articles(collection_id: str, account=Depends(require
 def delete_collection_article(collection_id: str, article_id: str, account=Depends(require_auth), db=Depends(get_db)):
     collection = _resolve_private_collection(db, collection_id, account["uuid"])
     db.delete_collection_dataset(collection["uri"], article_id)
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)
 
 
 @router.get("/account/collections/{collection_id}/funding", summary="List funding", tags=["Private Collection Funding"])
@@ -197,7 +197,7 @@ def list_collection_funding(collection_id: str, account=Depends(require_auth), d
 def delete_collection_funding(collection_id: str, funding_id: str, account=Depends(require_auth), db=Depends(get_db)):
     collection = _resolve_private_collection(db, collection_id, account["uuid"])
     db.delete_funding(item_uri=collection["uri"], funding_uuid=funding_id)
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)
 
 
 @router.post("/account/collections/{collection_id}/reserve_doi", summary="Reserve DOI", tags=["Private Collections"])

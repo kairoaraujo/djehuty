@@ -21,7 +21,8 @@ class ArticleService:
                       handle=None, groups=None, institution=None,
                       item_type=None, modified_since=None,
                       published_since=None, resource_doi=None,
-                      search_for=None, is_latest=True, **kwargs) -> list[dict]:
+                      search_for=None, is_latest=True, is_published=True,
+                      account_uuid=None, **kwargs) -> list[dict]:
         """Return a list of formatted article summaries."""
         records = self.db.datasets(
             limit=limit,
@@ -35,6 +36,8 @@ class ArticleService:
             institution=institution,
             item_type=item_type,
             modified_since=modified_since,
+            account_uuid=account_uuid,
+            is_published=is_published,
             published_since=published_since,
             resource_doi=resource_doi,
             search_for=search_for,
@@ -114,9 +117,10 @@ class ArticleService:
         return formatted, total_count
 
     def get_article_details(self, dataset_id, account_uuid=None,
-                            is_latest=True) -> dict | None:
+                            is_latest=False, is_published=True) -> dict | None:
         """Return formatted article detail or None."""
-        dataset = self._resolve_dataset(dataset_id, account_uuid, is_latest)
+        dataset = self._resolve_dataset(dataset_id, account_uuid, is_latest,
+                                        is_published=is_published)
         if dataset is None:
             return None
 

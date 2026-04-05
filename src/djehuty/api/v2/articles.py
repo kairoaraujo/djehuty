@@ -142,7 +142,7 @@ def get_article(
     dataset_id: str,
     service: ArticleService = Depends(_get_service),
 ):
-    result = service.get_article_details(dataset_id)
+    result = service.get_article_details(dataset_id, is_latest=True)
     if result is None:
         raise NotFoundError()
     return JSONResponse(content=result)
@@ -162,7 +162,7 @@ def list_article_versions(
     dataset_id: str,
     service: ArticleService = Depends(_get_service),
 ):
-    details = service.get_article_details(dataset_id)
+    details = service.get_article_details(dataset_id, is_latest=True)
     if details is None:
         raise NotFoundError()
 
