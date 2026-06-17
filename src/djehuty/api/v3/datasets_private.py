@@ -39,12 +39,17 @@ def _resolve_dataset(db, dataset_id, account_uuid):
         raise NotFoundError()
 
 
-@router.post(
+@router.put(
     "/datasets/{dataset_id}/submit-for-review",
     summary="Submit dataset for review",
     description="Submit a draft dataset for curator review before publication.",
 )
-def submit_for_review(dataset_id: str, account=Depends(require_auth), db=Depends(get_db)):
+def submit_for_review(
+    dataset_id: str,
+    body: dict | None = None,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
     dataset = _resolve_dataset(db, dataset_id, account["uuid"])
     result = db.submit_dataset_for_review(dataset["uri"], account["uuid"])
     if not result:
