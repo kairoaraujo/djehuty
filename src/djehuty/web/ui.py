@@ -696,7 +696,7 @@ def read_email_configuration (server, xml_root, logger):
 
     # Share the configured EmailInterface with djehuty.email so the FastAPI
     # handlers send through the same SMTP credentials as the legacy server.
-    from djehuty import email as email_module
+    from djehuty.services import email as email_module
     email_module.register_interface(server.email)
 
 def read_upload_dataset_configuration (xml_root, logger):

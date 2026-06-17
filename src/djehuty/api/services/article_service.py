@@ -205,8 +205,8 @@ class ArticleService:
         205 on success and 404/500 otherwise — callers map ``None`` to the
         appropriate HTTP status.
         """
-        from djehuty.imaging import generate_thumbnail
-        from djehuty.storage import filesystem_location
+        from djehuty.services.imaging import generate_thumbnail
+        from djehuty.services.storage import filesystem_location
 
         dataset = self._resolve_dataset(dataset_id, version=version)
         if dataset is None:

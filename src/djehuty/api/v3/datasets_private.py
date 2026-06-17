@@ -214,14 +214,48 @@ def submit_for_review(
                 "Dataset owner account not found.", "AccountMissing"
             )
 
-        if not db.update_dataset(**parameters):
-            raise InvalidInputError(
-                "Failed to persist dataset metadata.", "UpdateFailed"
-            )
+        # Guard the submit flow with the same process-level lock the legacy
+        # uses, so concurrent submits cannot race on review-record creation.
+        from djehuty.web.locks import Locks, LockTypes
+        from djehuty.services import email as email_module
 
-        if db.insert_review(dataset["uri"]) is None:
-            raise InvalidInputError(
-                "Failed to register review record.", "InsertReviewFailed"
+        process_locks = Locks()
+        process_locks.lock(LockTypes.SUBMIT_DATASET)
+        try:
+            if not db.update_dataset(**parameters):
+                raise InvalidInputError(
+                    "Failed to persist dataset metadata.", "UpdateFailed"
+                )
+
+            if db.insert_review(dataset["uri"]) is None:
+                raise InvalidInputError(
+                    "Failed to register review record.", "InsertReviewFailed"
+                )
+        finally:
+            process_locks.unlock(LockTypes.SUBMIT_DATASET)
+
+        # Side-effect notifications. Failures are logged but never affect the
+        # HTTP response (mirrors legacy behaviour).
+        subject = f"Request for review: {dataset['container_uuid']}"
+        email_module.send_email_to_reviewers(
+            db,
+            subject,
+            "submitted_for_review_notification",
+            account_email=value_or_none(account_record, "email"),
+            dataset=dataset,
+            account=account_record,
+        )
+
+        if config.in_production and not config.in_preproduction and account_record.get("email"):
+            email_module.send_templated_email(
+                db,
+                [account_record["email"]],
+                f"Submission of {dataset['title']}.",
+                "dataset_submitted",
+                dataset=dataset,
+                account=account_record,
+                support_email=config.support_email_address,
+                site_name=config.site_name,
             )
 
         return Response(status_code=204)
@@ -252,6 +286,10 @@ def publish_dataset(
         if account.get("group_id") != dataset.get("group_id"):
             raise ForbiddenError("Reviewer group mismatch.")
 
+    from djehuty.utils.convenience import value_or, value_or_none
+    from djehuty.services import datacite
+    from djehuty.services import email as email_module
+
     review_uri = dataset.get("review_uri")
     if review_uri:
         db.update_review(
@@ -261,18 +299,66 @@ def publish_dataset(
             status="assigned",
         )
 
-    if config.in_production and not config.in_preproduction:
-        # TODO: DataCite DOI helpers live on the legacy server; production
-        # deployments must keep ``api-service = legacy`` until they are
-        # extracted into a shared module.
-        raise InvalidInputError(
-            "Publishing via the FastAPI implementation is not yet wired up "
-            "for production DOI reservation.",
-            "PublishUnavailableInProd",
-        )
+    container_uuid = dataset["container_uuid"]
+    container = db.container(container_uuid)
+    new_version = value_or(container, "latest_published_version_number", 0) + 1
 
-    if not db.publish_dataset(dataset["container_uuid"], account["uuid"]):
+    # Production: register both the container DOI and the versioned DOI with
+    # DataCite, then push their metadata.
+    if config.in_production and not config.in_preproduction:
+        for version in (None, new_version):
+            reserved = datacite.reserve_and_save_doi(
+                db, account["uuid"], dataset, version=version
+            )
+            if not reserved:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Reserving DOI for {container_uuid} "
+                        f"(version={version}) failed."
+                    ),
+                )
+            if not datacite.update_item_doi(
+                db, container_uuid, version=version, item_type="dataset"
+            ):
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Updating DOI metadata for {container_uuid} "
+                        f"(version={version}) failed."
+                    ),
+                )
+
+    if not db.publish_dataset(container_uuid, account["uuid"]):
         raise InvalidInputError("Failed to publish dataset.", "PublishFailed")
+
+    # Re-fetch the dataset so we get the freshly assigned DOIs.
+    try:
+        dataset = db.datasets(dataset_uuid=dataset["uuid"], use_cache=False)[0]
+    except (IndexError, AttributeError):
+        dataset = dataset  # fall back to the pre-publish copy
+
+    # Send the approval e-mail to the depositor. Best-effort; logged on
+    # failure but does not block the publication response.
+    try:
+        owner = db.account_by_uuid(dataset["account_uuid"])
+        if owner and owner.get("email"):
+            subject = f"Approved: {dataset['title']}"
+            email_module.send_templated_email(
+                db,
+                [owner["email"]],
+                subject,
+                "dataset_approved",
+                base_url=config.base_url,
+                support_email=config.support_email_address,
+                title=dataset["title"],
+                container_uuid=container_uuid,
+                versioned_doi=value_or_none(dataset, "doi"),
+                container_doi=dataset.get("container_doi"),
+            )
+    except (KeyError, AttributeError, IndexError):
+        # Email side effects must never prevent publication.
+        pass
 
     return JSONResponse(
         content={"location": f"{config.base_url}/published/{dataset_id}"},
@@ -298,8 +384,41 @@ def decline_dataset(
         if account.get("group_id") != dataset.get("group_id"):
             raise ForbiddenError("Reviewer group mismatch.")
 
+    from djehuty.utils.convenience import value_or_none
+    from djehuty.services import email as email_module
+
     if not db.decline_dataset(dataset["container_uuid"], account["uuid"]):
         raise InvalidInputError("Failed to decline dataset.", "DeclineFailed")
+
+    # Notify the depositor and the reviewer pool. Best-effort; logged on
+    # failure but does not block the decline response.
+    try:
+        owner = db.account_by_uuid(dataset["account_uuid"])
+        if owner:
+            subject = f"Declined: {dataset['title']}"
+            parameters = {
+                "base_url": config.base_url,
+                "support_email": config.support_email_address,
+                "title": dataset["title"],
+            }
+            if owner.get("email"):
+                email_module.send_templated_email(
+                    db,
+                    [owner["email"]],
+                    subject,
+                    "dataset_declined",
+                    **parameters,
+                )
+            email_module.send_email_to_reviewers(
+                db,
+                subject,
+                "declined_dataset_notification",
+                account_email=value_or_none(owner, "email"),
+                dataset=dataset,
+                **parameters,
+            )
+    except (KeyError, AttributeError, IndexError):
+        pass
 
     return JSONResponse(
         content={"location": f"{config.base_url}/review/overview"},
@@ -460,16 +579,24 @@ async def upload_file(
 
     # Insert file metadata first so the file_uuid is available for the
     # destination filename. ``upload_url`` is stored verbatim for parity with
-    # the legacy implementation.
-    file_uuid = db.insert_file(
-        name=file.filename or "untitled",
-        size=0,
-        is_link_only=0,
-        upload_url=f"/article/{dataset_id}/upload",
-        upload_token=None,
-        dataset_uri=dataset["uri"],
-        account_uuid=account_uuid,
-    )
+    # the legacy implementation. Guarded by the FILE_LIST lock so concurrent
+    # uploads to the same dataset do not race on the file list update.
+    from djehuty.web.locks import Locks, LockTypes
+
+    process_locks = Locks()
+    process_locks.lock(LockTypes.FILE_LIST)
+    try:
+        file_uuid = db.insert_file(
+            name=file.filename or "untitled",
+            size=0,
+            is_link_only=0,
+            upload_url=f"/article/{dataset_id}/upload",
+            upload_token=None,
+            dataset_uri=dataset["uri"],
+            account_uuid=account_uuid,
+        )
+    finally:
+        process_locks.unlock(LockTypes.FILE_LIST)
 
     output_filename = os.path.join(config.storage, f"{dataset_id}_{file_uuid}")
     md5_hasher = hashlib.new("md5", usedforsecurity=False)
@@ -519,18 +646,34 @@ async def upload_file(
             pass
         raise InvalidInputError("MD5 checksum mismatch.", "MD5Mismatch")
 
-    # Final metadata write. Handle registration is best-effort and only
-    # relevant in production; we leave handle=None here.
+    from djehuty.services.imaging import image_mimetype
+    from djehuty.services.handles import register_file_handle
+
     download_url = f"{config.base_url}/file/{dataset_id}/{file_uuid}"
+
+    # Only attempt thumbnail-eligibility detection on small images, matching
+    # the legacy 10 MB ceiling.
+    is_image = False
+    if file_size < 10_000_001:
+        is_image = image_mimetype(output_filename) is not None
+
+    # Best-effort handle.net PID registration. Returns False (and the file
+    # is marked with handle=None) if not configured.
+    handle = None
+    if not is_incomplete:
+        handle = f"{config.handle_prefix}/{file_uuid}"
+        if not register_file_handle(handle, download_url):
+            handle = None
+
     db.update_file(
         account_uuid, file_uuid, dataset["uuid"],
         computed_md5=computed_md5,
         download_url=download_url,
         filesystem_location=output_filename,
         file_size=file_size,
-        is_image=False,
+        is_image=is_image,
         is_incomplete=is_incomplete,
-        handle=None,
+        handle=handle,
     )
 
     response_data: dict[str, object] = {
