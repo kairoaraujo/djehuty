@@ -102,6 +102,69 @@ def list_collection_articles(
 
 # --- Private (authenticated) endpoints ---
 
+@router.post(
+    "/account/collections",
+    status_code=200,
+    summary="Create a new draft collection",
+    tags=["Private Collections"],
+)
+def create_collection(
+    body: dict,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from djehuty.utils.convenience import value_or_none
+    from djehuty.web import validator
+
+    try:
+        group_id = validator.integer_value(body, "group_id", 0, pow(2, 63), False)
+        if group_id is None:
+            acct = db.account_by_uuid(account["uuid"])
+            group_id = value_or_none(acct, "group_id")
+
+        publisher = validator.string_value(body, "publisher", 0, 255, False)
+        if publisher is None:
+            publisher = config.site_name
+
+        container_uuid, _ = db.insert_collection(
+            title=validator.string_value(body, "title", 3, 1000, True),
+            account_uuid=account["uuid"],
+            description=validator.string_value(body, "description", 0, 10000, False, strip_html=False),
+            funding=validator.string_value(body, "funding", 0, 255, False),
+            language=validator.string_value(body, "language", 0, 8, False),
+            doi=validator.string_value(body, "doi", 0, 255, False),
+            handle=validator.string_value(body, "handle", 0, 255, False),
+            resource_doi=validator.string_value(body, "resource_doi", 0, 255, False),
+            resource_title=validator.string_value(body, "resource_title", 0, 255, False),
+            group_id=group_id,
+            publisher=publisher,
+            custom_fields=validator.object_value(body, "custom_fields", False),
+            custom_fields_list=validator.array_value(body, "custom_fields_list", False),
+        )
+        return JSONResponse(content={
+            "location": f"{config.base_url}/v2/account/collections/{container_uuid}",
+            "warnings": [],
+        })
+    except validator.ValidationException as error:
+        raise InvalidInputError(error.message, error.code)
+
+
+@router.delete(
+    "/account/collections/{collection_id}",
+    summary="Delete a draft collection",
+    tags=["Private Collections"],
+)
+def delete_collection(
+    collection_id: str,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    collection = _resolve_private_collection(db, collection_id, account["uuid"])
+    if not db.delete_collection_draft(collection["container_uuid"], account["uuid"]):
+        raise InvalidInputError("Failed to delete collection.", "DeleteFailed")
+    return Response(status_code=204)
+
+
 @router.get("/account/collections", summary="List own draft collections", tags=["Private Collections"])
 def list_private_collections(
     account=Depends(require_auth),

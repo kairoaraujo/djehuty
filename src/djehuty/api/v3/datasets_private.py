@@ -759,25 +759,34 @@ def list_dataset_authors_v3(
     container_uuid: str,
     account=Depends(require_auth),
     db=Depends(get_db),
+    order: str | None = Query(None, max_length=32),
+    order_direction: str | None = Query(None, pattern="^(asc|desc)$"),
+    limit: int | None = Query(None, ge=1, le=10000),
 ):
-    # Owners can see authors on any state (draft / published); readers only
-    # on published.
+    from djehuty.web import validator
+
+    if not validator.is_valid_uuid(container_uuid):
+        raise NotFoundError()
     try:
         dataset = db.datasets(
             container_uuid=container_uuid,
             account_uuid=account["uuid"],
-            is_latest=None,
-            is_published=None,
+            is_published=False,
+            is_latest=False,
             limit=1,
         )[0]
     except (IndexError, AttributeError):
-        try:
-            dataset = db.datasets(
-                container_uuid=container_uuid, is_latest=True, limit=1,
-            )[0]
-        except (IndexError, AttributeError):
-            raise NotFoundError()
-    authors = db.authors(item_uri=dataset["uri"], item_type="dataset", limit=10000)
+        raise NotFoundError()
+
+    authors = db.authors(
+        item_uri=dataset["uri"],
+        account_uuid=account["uuid"],
+        is_published=False,
+        item_type="dataset",
+        limit=limit,
+        order=order or "order_index",
+        order_direction=order_direction or "asc",
+    )
     return JSONResponse(content=[formatter.format_author_record_v3(a) for a in authors])
 
 
