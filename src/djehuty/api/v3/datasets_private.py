@@ -1,6 +1,9 @@
 """Authenticated dataset management endpoints for the v3 API."""
 
-from fastapi import APIRouter, Depends, Query, Response
+import hashlib
+import os
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from djehuty.web import formatter
@@ -195,6 +198,169 @@ def list_image_files(dataset_id: str, account=Depends(require_auth), db=Depends(
     image_extensions = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".tif", ".tiff")
     image_files = [f for f in files if any(f.get("name", "").lower().endswith(ext) for ext in image_extensions)]
     return JSONResponse(content=[formatter.format_file_for_dataset_record(f) for f in image_files])
+
+
+# ---------------------------------------------------------------------------
+# Upload
+#
+# Native FastAPI port of /v3/datasets/<id>/upload. Same observable behaviour
+# as the legacy ``api_v3_dataset_upload_file`` (status codes, response shape,
+# storage path layout, MD5 strict-check semantics), but implemented using
+# Starlette's built-in multipart parser (via ``UploadFile``) instead of the
+# legacy's manual byte-level boundary parsing. Once api-service=new is the
+# only configuration, the legacy 500-line implementation can be deleted.
+# ---------------------------------------------------------------------------
+
+_UPLOAD_CHUNK_SIZE = 4096
+_EMPTY_FILE_MD5 = "d41d8cd98f00b204e9800998ecf8427e"
+
+
+@router.post(
+    "/datasets/{dataset_id}/upload",
+    summary="Upload a file to a dataset",
+    description=(
+        "Stream-upload a single file into a draft dataset.\n\n"
+        "Request body must be ``multipart/form-data`` with one file part.\n\n"
+        "Query parameters:\n"
+        "- ``strict_check=1`` — reject empty files, duplicate MD5s, and "
+        "MD5 mismatches; the ``md5`` parameter becomes required.\n"
+        "- ``md5`` — 32-character hex MD5 of the file's contents (required "
+        "when ``strict_check=1``).\n\n"
+        "Responses:\n"
+        "- ``200`` — file accepted, ``{\"location\": \"<base>/v3/file/<uuid>\"}``\n"
+        "- ``400`` — empty file, malformed body, or MD5 mismatch\n"
+        "- ``403`` — account has no quota or no permission to edit dataset\n"
+        "- ``409`` — duplicate file (only when ``strict_check=1``)\n"
+        "- ``413`` — file exceeds remaining quota\n"
+        "- ``415`` — not multipart/form-data"
+    ),
+    tags=["Dataset Files"],
+)
+async def upload_file(
+    dataset_id: str,
+    file: UploadFile = File(...),
+    strict_check: int = Query(0, ge=0, le=1),
+    md5: str | None = Query(None, min_length=32, max_length=32),
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    account_uuid = account["uuid"]
+
+    # Quota check.
+    account_record = db.account_by_uuid(account_uuid)
+    if account_record is None or "quota" not in account_record:
+        raise ForbiddenError(
+            f"account:{account_uuid} attempted to upload a file but has no "
+            f"assigned quota."
+        )
+
+    storage_used = db.account_storage_used(account_uuid)
+    storage_available = account_record["quota"] - storage_used
+    if storage_available < 1:
+        raise HTTPException(status_code=413, detail="Quota exhausted.")
+
+    # Dataset ownership check (must be the owner's draft).
+    dataset = _resolve_dataset(db, dataset_id, account_uuid)
+
+    # Strict-check pre-validation.
+    if strict_check:
+        if md5 is None:
+            raise InvalidInputError(
+                "md5 query parameter is required when strict_check=1.",
+                "MissingMD5",
+            )
+        if md5 == _EMPTY_FILE_MD5:
+            raise InvalidInputError("Empty file is not allowed.", "EmptyFile")
+        for existing in db.dataset_files(
+            dataset_uri=dataset["uri"], account_uuid=account_uuid
+        ):
+            if existing.get("computed_md5") == md5:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A file with the same MD5 is already attached.",
+                )
+
+    # Insert file metadata first so the file_uuid is available for the
+    # destination filename. ``upload_url`` is stored verbatim for parity with
+    # the legacy implementation.
+    file_uuid = db.insert_file(
+        name=file.filename or "untitled",
+        size=0,
+        is_link_only=0,
+        upload_url=f"/article/{dataset_id}/upload",
+        upload_token=None,
+        dataset_uri=dataset["uri"],
+        account_uuid=account_uuid,
+    )
+
+    output_filename = os.path.join(config.storage, f"{dataset_id}_{file_uuid}")
+    md5_hasher = hashlib.new("md5", usedforsecurity=False)
+    file_size = 0
+    is_incomplete: int | None = None
+
+    try:
+        # Use os.open + write so we can chmod the same descriptor afterwards,
+        # matching the legacy's permission-tightening behaviour.
+        destination_fd = os.open(output_filename, os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            while True:
+                chunk = await file.read(_UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                if file_size + len(chunk) > storage_available:
+                    is_incomplete = 1
+                    break
+                written = os.write(destination_fd, chunk)
+                file_size += written
+                md5_hasher.update(chunk)
+            if os.name != "nt":
+                os.fchmod(destination_fd, 0o400)
+        finally:
+            os.close(destination_fd)
+    except OSError as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Writing {output_filename} to disk failed: {error}",
+        )
+
+    computed_md5 = md5_hasher.hexdigest()
+
+    # MD5 strict-check enforcement: clean up the partial upload then 400.
+    if strict_check and computed_md5 != md5:
+        try:
+            from djehuty.utils.rdf import uuid_to_uri
+            file_uri = uuid_to_uri(file_uuid, "file")
+            if db.delete_item_from_list(dataset["uri"], "files", file_uri):
+                db.cache.invalidate_by_prefix(f"{account_uuid}_storage")
+                db.cache.invalidate_by_prefix(f"{dataset['uuid']}_dataset_storage")
+        except (ImportError, KeyError, StopIteration):
+            pass
+        try:
+            os.remove(output_filename)
+        except OSError:
+            pass
+        raise InvalidInputError("MD5 checksum mismatch.", "MD5Mismatch")
+
+    # Final metadata write. Handle registration is best-effort and only
+    # relevant in production; we leave handle=None here.
+    download_url = f"{config.base_url}/file/{dataset_id}/{file_uuid}"
+    db.update_file(
+        account_uuid, file_uuid, dataset["uuid"],
+        computed_md5=computed_md5,
+        download_url=download_url,
+        filesystem_location=output_filename,
+        file_size=file_size,
+        is_image=False,
+        is_incomplete=is_incomplete,
+        handle=None,
+    )
+
+    response_data: dict[str, object] = {
+        "location": f"{config.base_url}/v3/file/{file_uuid}"
+    }
+    if is_incomplete:
+        response_data["is_incomplete"] = is_incomplete
+    return JSONResponse(content=response_data)
 
 
 # --- Collaborators ---
