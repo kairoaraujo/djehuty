@@ -8,7 +8,12 @@ from fastapi.responses import JSONResponse
 
 from djehuty.web import formatter
 from djehuty.web.config import config
-from djehuty.api.dependencies import get_db, get_current_account, require_auth
+from djehuty.api.dependencies import (
+    get_current_account,
+    get_db,
+    require_auth,
+    resolve_reviewer_context,
+)
 from djehuty.api.exceptions import NotFoundError, ForbiddenError, InvalidInputError
 
 router = APIRouter(tags=["Dataset Management"])
@@ -274,28 +279,38 @@ def submit_for_review(
     ),
 )
 def publish_dataset(
-    dataset_id: str, account=Depends(require_auth), db=Depends(get_db)
+    dataset_id: str,
+    account=Depends(require_auth),
+    reviewer=Depends(resolve_reviewer_context),
+    db=Depends(get_db),
 ):
-    if not (db.may_review(account.get("uuid"))
-            or db.may_review_institution(account.get("uuid"))):
-        raise ForbiddenError("Reviewer permissions required.")
-
+    # ``account`` is resolved from the regular session cookie (the
+    # dataset's owner — the impersonated depositor when the reviewer
+    # invoked /review/goto-dataset/<id> first).
+    # ``reviewer`` is resolved from the impersonator cookie when present,
+    # otherwise from the same session as ``account``; in both cases it is
+    # guaranteed to have reviewer permissions.
     dataset = _resolve_dataset(db, dataset_id, account["uuid"])
 
-    if db.may_review_institution(account.get("uuid")):
-        if account.get("group_id") != dataset.get("group_id"):
-            raise ForbiddenError("Reviewer group mismatch.")
+    if (
+        reviewer["may_review_institution"]
+        and not reviewer["may_review_all"]
+        and reviewer["account"].get("group_id") != dataset.get("group_id")
+    ):
+        raise ForbiddenError("Reviewer group mismatch.")
 
     from djehuty.utils.convenience import value_or, value_or_none
     from djehuty.services import datacite
     from djehuty.services import email as email_module
+
+    reviewer_account = reviewer["account"]
 
     review_uri = dataset.get("review_uri")
     if review_uri:
         db.update_review(
             review_uri,
             author_account_uuid=dataset["account_uuid"],
-            assigned_to=account.get("uuid"),
+            assigned_to=reviewer_account.get("uuid"),
             status="assigned",
         )
 
@@ -372,17 +387,19 @@ def publish_dataset(
     description="Decline a dataset that was submitted for review. Requires reviewer privileges.",
 )
 def decline_dataset(
-    dataset_id: str, account=Depends(require_auth), db=Depends(get_db)
+    dataset_id: str,
+    account=Depends(require_auth),
+    reviewer=Depends(resolve_reviewer_context),
+    db=Depends(get_db),
 ):
-    if not (db.may_review(account.get("uuid"))
-            or db.may_review_institution(account.get("uuid"))):
-        raise ForbiddenError("Reviewer permissions required.")
-
     dataset = _resolve_dataset(db, dataset_id, account["uuid"])
 
-    if db.may_review_institution(account.get("uuid")):
-        if account.get("group_id") != dataset.get("group_id"):
-            raise ForbiddenError("Reviewer group mismatch.")
+    if (
+        reviewer["may_review_institution"]
+        and not reviewer["may_review_all"]
+        and reviewer["account"].get("group_id") != dataset.get("group_id")
+    ):
+        raise ForbiddenError("Reviewer group mismatch.")
 
     from djehuty.utils.convenience import value_or_none
     from djehuty.services import email as email_module

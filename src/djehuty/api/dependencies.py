@@ -46,6 +46,46 @@ def require_auth(account: dict | None = Depends(get_current_account)) -> dict:
     return account
 
 
+def get_impersonator_token(request: Request) -> str | None:
+    """Extract the impersonator session token, if any.
+
+    Used by reviewer workflows where a reviewer "becomes" the depositor
+    by visiting /review/goto-dataset/<id>, which sets this cookie.
+    """
+    return request.cookies.get("impersonator_djehuty_session")
+
+
+def resolve_reviewer_context(
+    db=Depends(get_db),
+    impersonator_token: str | None = Depends(get_impersonator_token),
+    submitter_token: str | None = Depends(get_token),
+) -> dict:
+    """Determine which account is invoking a reviewer action.
+
+    Mirrors the legacy precedence: try the impersonator cookie first
+    (set by /review/goto-dataset/<id>), then fall back to the regular
+    session token. Raises ``AuthorizationError`` if neither token
+    grants reviewer privileges.
+
+    Returns a dict with keys:
+        token: the token whose perms apply
+        account: the account record for that token
+        may_review_all: bool
+        may_review_institution: bool
+    """
+    for token in (impersonator_token, submitter_token):
+        if not token:
+            continue
+        if db.may_review(token) or db.may_review_institution(token):
+            return {
+                "token": token,
+                "account": db.account_by_session_token(token),
+                "may_review_all": bool(db.may_review(token)),
+                "may_review_institution": bool(db.may_review_institution(token)),
+            }
+    raise AuthorizationError()
+
+
 def pagination_params(
     page: int | None = Query(None, ge=1, description="Page number (1-based). Mutually exclusive with offset."),
     page_size: int | None = Query(None, ge=1, le=1000, description="Number of items per page. Used with `page`."),
