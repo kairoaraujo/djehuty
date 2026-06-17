@@ -86,6 +86,26 @@ def resolve_reviewer_context(
     raise AuthorizationError()
 
 
+def require_admin(
+    token: str | None = Depends(get_token),
+    account: dict | None = Depends(get_current_account),
+    db=Depends(get_db),
+) -> dict:
+    """Enforce administrator permissions on the calling account.
+
+    Returns the account dict. Raises ``AuthorizationError`` if the session
+    is unauthenticated, ``ForbiddenError`` if the token does not grant
+    ``may_administer``.
+    """
+    from djehuty.api.exceptions import ForbiddenError
+
+    if account is None or token is None:
+        raise AuthorizationError()
+    if not db.may_administer(token):
+        raise ForbiddenError("Administrator permissions required.")
+    return account
+
+
 def pagination_params(
     page: int | None = Query(None, ge=1, description="Page number (1-based). Mutually exclusive with offset."),
     page_size: int | None = Query(None, ge=1, le=1000, description="Number of items per page. Used with `page`."),

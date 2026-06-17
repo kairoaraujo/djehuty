@@ -11,6 +11,7 @@ from djehuty.web.config import config
 from djehuty.api.dependencies import (
     get_current_account,
     get_db,
+    require_admin,
     require_auth,
     resolve_reviewer_context,
 )
@@ -890,10 +891,7 @@ def explore_property_value_types(db=Depends(get_db)):
 
 
 @router.get("/explore/clear-cache", summary="Clear explorer cache", tags=["Explorer"])
-def explore_clear_cache(account=Depends(require_auth), db=Depends(get_db)):
-    # Legacy gates this behind ``may_administer``; mirror that.
-    if not db.may_administer(account.get("uuid")):
-        raise ForbiddenError("Administrator permissions required.")
+def explore_clear_cache(account=Depends(require_admin), db=Depends(get_db)):
     db.cache.invalidate_all()
     return Response(status_code=204)
 
@@ -901,23 +899,19 @@ def explore_clear_cache(account=Depends(require_auth), db=Depends(get_db)):
 # --- Admin ---
 
 @router.get("/admin/files-integrity-statistics", summary="File integrity statistics", tags=["Admin"])
-def files_integrity_statistics(account=Depends(require_auth), db=Depends(get_db)):
+def files_integrity_statistics(account=Depends(require_admin), db=Depends(get_db)):
     records = db.files_integrity_statistics()
     return JSONResponse(content=records)
 
 
 @router.get("/admin/accounts/clear-cache", summary="Clear accounts cache", tags=["Admin"])
-def admin_clear_accounts_cache(account=Depends(require_auth), db=Depends(get_db)):
-    if not db.may_administer(account.get("uuid")):
-        raise ForbiddenError("Administrator permissions required.")
+def admin_clear_accounts_cache(account=Depends(require_admin), db=Depends(get_db)):
     db.cache.invalidate_by_prefix("accounts")
     return Response(status_code=204)
 
 
 @router.get("/admin/reviews/clear-cache", summary="Clear reviews cache", tags=["Admin"])
-def admin_clear_reviews_cache(account=Depends(require_auth), db=Depends(get_db)):
-    if not db.may_administer(account.get("uuid")):
-        raise ForbiddenError("Administrator permissions required.")
+def admin_clear_reviews_cache(account=Depends(require_admin), db=Depends(get_db)):
     db.cache.invalidate_by_prefix("reviews")
     return Response(status_code=204)
 
