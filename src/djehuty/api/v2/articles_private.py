@@ -592,12 +592,20 @@ def get_author(
     return JSONResponse(content=formatter.format_author_details_record(author[0]))
 
 
-@router.get("/funding/search", summary="Search funding", tags=["Funding Search"])
+@router.post("/funding/search", summary="Search funding", tags=["Funding Search"])
 def search_funding(
-    search_for: str = Query(..., max_length=255),
+    body: dict,
     account=Depends(require_auth),
     db=Depends(get_db),
 ):
+    # Legacy reads ``search`` from the JSON body (POST), not from the query
+    # string. Match that contract.
+    search_for = body.get("search") if isinstance(body, dict) else None
+    if not isinstance(search_for, str) or len(search_for) > 255:
+        raise InvalidInputError(
+            "Field 'search' is required and must be a string of <= 255 chars.",
+            "BadSearch",
+        )
     records = db.fundings(search_for=search_for)
     return JSONResponse(content=[formatter.format_funding_record(r) for r in records])
 
