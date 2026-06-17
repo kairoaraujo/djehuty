@@ -772,15 +772,18 @@ def get_institution_account(
     from djehuty.utils.convenience import parses_to_int
     from djehuty.web import validator
 
-    # Reject ids that are neither integer nor UUID.
-    if not parses_to_int(account_id) and not validator.is_valid_uuid(account_id):
+    # AS-IS (#111): the legacy guard validates the caller's OWN uuid
+    # (account["uuid"]) instead of account_id, so it is always a valid UUID and
+    # the 400 branch is effectively unreachable for any account_id. A bad
+    # account_id therefore falls through to account_by_uuid(account_id), which
+    # returns None, and format_account_record(None) yields a blank record at
+    # HTTP 200. Reproduce the wrong-variable check and the missing None guard.
+    if not parses_to_int(account_id) and not validator.is_valid_uuid(account["uuid"]):
         raise InvalidInputError(
             "'id' must be either an integer or a UUID.", "InvalidAccountId",
         )
 
     user = db.account_by_uuid(account_id)
-    if user is None:
-        raise NotFoundError()
     return JSONResponse(content=formatter.format_account_record(user))
 
 

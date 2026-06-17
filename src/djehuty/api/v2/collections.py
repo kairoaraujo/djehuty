@@ -201,10 +201,56 @@ def get_private_collection(
     account=Depends(require_auth),
     service: CollectionService = Depends(_get_service),
 ):
-    result = service.get_collection_details(collection_id, account_uuid=account["uuid"], is_latest=False)
+    result = service.get_collection_details(
+        collection_id, account_uuid=account["uuid"],
+        is_latest=False, is_published=False,
+    )
     if result is None:
         raise NotFoundError()
     return JSONResponse(content=result)
+
+
+@router.put(
+    "/account/collections/{collection_id}",
+    summary="Update collection metadata",
+    tags=["Private Collections"],
+)
+def update_private_collection(
+    collection_id: str,
+    body: dict,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from djehuty.web import validator
+
+    collection = _resolve_private_collection(db, collection_id, account["uuid"])
+    try:
+        result = db.update_collection(
+            collection["uuid"],
+            account["uuid"],
+            title=validator.string_value(body, "title", 3, 1000, False),
+            description=validator.string_value(
+                body, "description", 0, 10000, False, strip_html=False,
+            ),
+            resource_doi=validator.string_value(body, "resource_doi", 0, 255, False),
+            resource_title=validator.string_value(body, "resource_title", 0, 255, False),
+            group_id=validator.integer_value(body, "group_id", 0, pow(2, 63), False),
+            time_coverage=validator.string_value(body, "time_coverage", 0, 512, False),
+            publisher=validator.string_value(body, "publisher", 0, 10000, False),
+            language=validator.string_value(body, "language", 0, 10000, False),
+            contributors=validator.string_value(body, "contributors", 0, 10000, False),
+            geolocation=validator.string_value(body, "geolocation", 0, 255, False),
+            longitude=validator.string_value(body, "longitude", 0, 64, False),
+            latitude=validator.string_value(body, "latitude", 0, 64, False),
+            organizations=validator.string_value(body, "organizations", 0, 2048, False),
+            categories=validator.array_value(body, "categories", False),
+        )
+    except validator.ValidationException as error:
+        raise InvalidInputError(error.message, error.code)
+
+    if result is None:
+        raise InvalidInputError("Failed to update collection.", "UpdateFailed")
+    return Response(status_code=205)
 
 
 @router.get("/account/collections/{collection_id}/authors", summary="List collection authors", tags=["Private Collection Authors"])
@@ -212,6 +258,59 @@ def list_collection_authors(collection_id: str, account=Depends(require_auth), d
     collection = _resolve_private_collection(db, collection_id, account["uuid"])
     authors = db.authors(item_uri=collection["uri"], item_type="collection", account_uuid=account["uuid"], limit=10000)
     return JSONResponse(content=[formatter.format_author_record(a) for a in authors])
+
+
+@router.post(
+    "/account/collections/{collection_id}/authors",
+    summary="Add authors to collection",
+    tags=["Private Collection Authors"],
+)
+@router.put(
+    "/account/collections/{collection_id}/authors",
+    summary="Replace collection authors",
+    tags=["Private Collection Authors"],
+)
+def upsert_collection_authors(
+    collection_id: str,
+    body: dict,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from djehuty.utils.rdf import uris_from_records
+
+    collection = _resolve_private_collection(db, collection_id, account["uuid"])
+    input_authors = body.get("authors", [])
+    if not isinstance(input_authors, list):
+        raise InvalidInputError("Expected an 'authors' field.", "NoAuthorsField")
+
+    new_author_uuids: list[str] = []
+    for author_data in input_authors:
+        if isinstance(author_data, dict) and author_data.get("uuid"):
+            new_author_uuids.append(author_data["uuid"])
+        elif isinstance(author_data, dict):
+            author_uuid = db.insert_author(
+                first_name=author_data.get("first_name", ""),
+                last_name=author_data.get("last_name", ""),
+                full_name=(author_data.get("name")
+                           or f"{author_data.get('first_name', '')} {author_data.get('last_name', '')}".strip()),
+                email=author_data.get("email"),
+                orcid_id=author_data.get("orcid_id"),
+            )
+            if author_uuid:
+                new_author_uuids.append(author_uuid)
+
+    existing = db.authors(
+        item_uri=collection["uri"], item_type="collection",
+        account_uuid=account["uuid"], is_published=False, limit=10000,
+    )
+    existing_uuids = [a["uuid"] for a in existing if "uuid" in a]
+
+    combined = existing_uuids + [u for u in new_author_uuids if u not in existing_uuids]
+    combined_records = [{"uuid": u} for u in combined]
+    uris = uris_from_records(combined_records, "author", "uuid")
+    if not db.update_item_list(collection["uuid"], account["uuid"], uris, "authors"):
+        raise InvalidInputError("Failed to update authors.", "UpdateFailed")
+    return Response(status_code=205)
 
 
 @router.delete("/account/collections/{collection_id}/authors/{author_id}", summary="Remove author", tags=["Private Collection Authors"])
@@ -238,7 +337,10 @@ def delete_collection_category(collection_id: str, category_id: int, account=Dep
 @router.get("/account/collections/{collection_id}/articles", summary="List collection articles (private)", tags=["Private Collection Articles"])
 def list_private_collection_articles(collection_id: str, account=Depends(require_auth), db=Depends(get_db), paging: dict = Depends(pagination_params)):
     collection = _resolve_private_collection(db, collection_id, account["uuid"])
-    datasets = db.collection_datasets(container_uri=collection["container_uri"], limit=paging["limit"], offset=paging["offset"])
+    datasets = db.datasets(
+        collection_uri=collection["uri"], is_latest=True,
+        limit=paging["limit"], offset=paging["offset"],
+    )
     return JSONResponse(content=[formatter.format_dataset_record({**r, "base_url": config.base_url}) for r in datasets])
 
 

@@ -47,9 +47,11 @@ class CollectionService:
         return formatted, len(records) if records else None
 
     def get_collection_details(self, collection_id, account_uuid=None,
-                               is_latest=True) -> dict | None:
+                               is_latest=True, is_published=True) -> dict | None:
         """Return formatted collection detail or None."""
-        collection = self._resolve_collection(collection_id, account_uuid, is_latest)
+        collection = self._resolve_collection(
+            collection_id, account_uuid, is_latest, is_published=is_published,
+        )
         if collection is None:
             return None
 
@@ -63,6 +65,12 @@ class CollectionService:
             authors=self.db.authors(item_uri=collection_uri, item_type="collection"),
             tags=self.db.tags(item_uri=collection_uri),
             references=self.db.references(item_uri=collection_uri),
+            custom_fields=self.db.custom_fields(
+                item_uri=collection_uri, item_type="collection",
+            ),
+            datasets_count=self.db.collections_dataset_count(
+                collection_uri=collection_uri,
+            ),
         )
 
     def get_collection_versions(self, container_uuid, order="version",
@@ -92,7 +100,8 @@ class CollectionService:
             for r in records
         ]
 
-    def _resolve_collection(self, collection_id, account_uuid=None, is_latest=True):
+    def _resolve_collection(self, collection_id, account_uuid=None,
+                            is_latest=True, is_published=True):
         """Resolve a collection by numeric ID or UUID."""
         try:
             try:
@@ -101,12 +110,14 @@ class CollectionService:
                     collection_id=numeric_id,
                     account_uuid=account_uuid,
                     is_latest=is_latest,
+                    is_published=is_published,
                 )[0]
             except (ValueError, TypeError):
                 return self.db.collections(
                     container_uuid=str(collection_id),
                     account_uuid=account_uuid,
                     is_latest=is_latest,
+                    is_published=is_published,
                 )[0]
         except (IndexError, AttributeError):
             return None

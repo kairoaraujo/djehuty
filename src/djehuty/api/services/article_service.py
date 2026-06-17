@@ -240,17 +240,15 @@ class ArticleService:
 
     def get_article_file_details(self, dataset_id, file_id) -> dict | None:
         """Return details for a single file of a published article."""
+        # AS-IS (#111): legacy dereferences dataset["uri"] with no None guard,
+        # so a missing dataset (None) raises TypeError -> uncaught -> HTTP 500
+        # (not 404). Reproduce: no None guard and no TypeError swallowing.
         dataset = self._resolve_dataset(dataset_id, is_published=True)
-        if dataset is None:
-            return None
-        try:
-            records = self.db.dataset_files(dataset_uri=dataset["uri"])
-            for record in records:
-                if record.get("uuid") == file_id or str(record.get("id")) == str(file_id):
-                    record["base_url"] = config.base_url
-                    return formatter.format_file_for_dataset_record(record)
-        except (KeyError, TypeError):
-            pass
+        records = self.db.dataset_files(dataset_uri=dataset["uri"])
+        for record in records:
+            if record.get("uuid") == file_id or str(record.get("id")) == str(file_id):
+                record["base_url"] = config.base_url
+                return formatter.format_file_for_dataset_record(record)
         return None
 
     def _resolve_dataset(self, dataset_id, account_uuid=None, is_latest=False,

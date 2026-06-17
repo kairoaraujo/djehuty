@@ -137,5 +137,9 @@ def get_profile_picture_for_account(account_uuid: str, db=Depends(get_db)):
         if mimetype is None:
             raise ForbiddenError("Unsupported image format.")
         return FileResponse(file_path, media_type=mimetype)
-    except (KeyError, TypeError, FileNotFoundError):
+    except (KeyError, FileNotFoundError):
+        # AS-IS (#111): for a missing account, account_by_uuid returns None and
+        # acct["profile_image"] raises TypeError, which legacy's
+        # `except (KeyError, FileNotFoundError)` does not catch -> uncaught ->
+        # HTTP 500. So TypeError is deliberately NOT caught here.
         raise NotFoundError()

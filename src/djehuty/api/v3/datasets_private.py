@@ -880,36 +880,208 @@ def assign_reviewer(
 
 @router.get("/datasets/top/{item_type}", summary="Get top datasets by type", tags=["Statistics"])
 def datasets_top(item_type: str, db=Depends(get_db), limit: int = Query(10, ge=1, le=100)):
+    # AS-IS (#111): legacy validates item_type against this whitelist and so
+    # rejects the documented default value "datasets" with 400.
+    if item_type not in {"downloads", "views", "shares", "cites"}:
+        raise InvalidInputError(
+            "The last URL parameter must be one of "
+            "'downloads', 'views', 'shares' or 'cites'.",
+            "InvalidURLParameterValue",
+        )
     records = db.dataset_statistics(item_type=item_type, limit=limit)
     return JSONResponse(content=records)
 
 
 @router.get("/datasets/timeline/{item_type}", summary="Get dataset timeline", tags=["Statistics"])
 def datasets_timeline(item_type: str, db=Depends(get_db)):
+    # AS-IS (#111): legacy validates item_type against this whitelist and so
+    # rejects the documented default value "datasets" with 400 (mirrors the
+    # sibling /datasets/top/{item_type} handler above).
+    if item_type not in {"downloads", "views", "shares", "cites"}:
+        raise InvalidInputError(
+            "The last URL parameter must be one of "
+            "'downloads', 'views', 'shares' or 'cites'.",
+            "InvalidURLParameterValue",
+        )
     records = db.dataset_statistics_timeline(item_type=item_type)
     return JSONResponse(content=records)
 
 
 # --- Collections (v3) ---
 
-@router.get("/collections/{collection_id}/references", summary="List collection references", tags=["Collection Metadata"])
-def list_collection_references(collection_id: str, db=Depends(get_db)):
+def _resolve_collection_for_owner(db, collection_id: str, account_uuid: str) -> dict:
+    """Resolve a draft collection owned by ``account_uuid`` or raise 404."""
     try:
-        collection = db.collections(container_uuid=str(collection_id), is_latest=True)[0]
+        try:
+            numeric_id = int(collection_id)
+            return db.collections(
+                collection_id=numeric_id,
+                account_uuid=account_uuid,
+                is_published=False,
+            )[0]
+        except (ValueError, TypeError):
+            return db.collections(
+                container_uuid=str(collection_id),
+                account_uuid=account_uuid,
+                is_published=False,
+            )[0]
     except (IndexError, AttributeError):
         raise NotFoundError()
-    refs = db.references(item_uri=collection["uri"])
+
+
+@router.get(
+    "/collections/{collection_id}/references",
+    summary="List collection references",
+    tags=["Collection Metadata"],
+)
+def list_collection_references(
+    collection_id: str, account=Depends(require_auth), db=Depends(get_db),
+):
+    collection = _resolve_collection_for_owner(db, collection_id, account["uuid"])
+    refs = db.references(item_uri=collection["uri"], account_uuid=account["uuid"])
     return JSONResponse(content=[formatter.format_reference_record(r) for r in refs])
 
 
-@router.get("/collections/{collection_id}/tags", summary="List collection tags", tags=["Collection Metadata"])
-def list_collection_tags(collection_id: str, db=Depends(get_db)):
+@router.post(
+    "/collections/{collection_id}/references",
+    summary="Add references to a collection",
+    tags=["Collection Metadata"],
+)
+def add_collection_references(
+    collection_id: str,
+    body: dict,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from djehuty.web import validator
+
+    collection = _resolve_collection_for_owner(db, collection_id, account["uuid"])
+    records = body.get("references")
+    if not isinstance(records, list):
+        raise InvalidInputError("Expected a 'references' field.", "NoReferencesField")
+    new_urls: list[str] = []
     try:
-        collection = db.collections(container_uuid=str(collection_id), is_latest=True)[0]
-    except (IndexError, AttributeError):
+        for record in records:
+            new_urls.append(validator.string_value(record, "url", 0, 1024, True))
+    except validator.ValidationException as error:
+        raise InvalidInputError(error.message, error.code)
+
+    existing = db.references(item_uri=collection["uri"], account_uuid=account["uuid"])
+    urls = [r["url"] for r in existing] + new_urls
+    if not db.update_item_list(
+        collection["uuid"], account["uuid"], urls, "references",
+    ):
+        raise InvalidInputError("Updating references failed.", "UpdateFailed")
+    return Response(status_code=205)
+
+
+@router.delete(
+    "/collections/{collection_id}/references",
+    summary="Delete a collection reference",
+    tags=["Collection Metadata"],
+)
+def delete_collection_reference(
+    collection_id: str,
+    url: str = Query(..., max_length=1024),
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    collection = _resolve_collection_for_owner(db, collection_id, account["uuid"])
+    existing = db.references(item_uri=collection["uri"], account_uuid=account["uuid"])
+    urls = [r["url"] for r in existing]
+    try:
+        urls.remove(url)
+    except ValueError:
         raise NotFoundError()
-    tags = db.tags(item_uri=collection["uri"])
+    if not db.update_item_list(
+        collection["uuid"], account["uuid"], urls, "references",
+    ):
+        raise InvalidInputError("Deleting a reference failed.", "DeleteFailed")
+    return Response(status_code=204)
+
+
+@router.get(
+    "/collections/{collection_id}/tags",
+    summary="List collection tags",
+    tags=["Collection Metadata"],
+)
+def list_collection_tags(
+    collection_id: str, account=Depends(require_auth), db=Depends(get_db),
+):
+    collection = _resolve_collection_for_owner(db, collection_id, account["uuid"])
+    tags = db.tags(item_uri=collection["uri"], account_uuid=account["uuid"])
     return JSONResponse(content=[formatter.format_tag_record(t) for t in tags])
+
+
+@router.post(
+    "/collections/{collection_id}/tags",
+    summary="Add tags to a collection",
+    tags=["Collection Metadata"],
+)
+def add_collection_tags(
+    collection_id: str,
+    body: dict,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from djehuty.utils.convenience import deduplicate_list
+    from djehuty.web import validator
+
+    collection = _resolve_collection_for_owner(db, collection_id, account["uuid"])
+    new_tags_input = body.get("tags")
+    if not isinstance(new_tags_input, list):
+        raise InvalidInputError("Expected a 'tags' field.", "NoTagsField")
+    new_tags: list[str] = []
+    try:
+        for index, _ in enumerate(new_tags_input):
+            new_tags.append(
+                validator.string_value(new_tags_input, index, 0, 512, True),
+            )
+    except validator.ValidationException as error:
+        raise InvalidInputError(error.message, error.code)
+
+    existing = db.tags(
+        item_uri=collection["uri"], account_uuid=account["uuid"], limit=10000,
+    )
+    existing_tags = [t["tag"] for t in existing]
+    merged = deduplicate_list(existing_tags + new_tags)
+    if not db.update_item_list(
+        collection["uuid"], account["uuid"], merged, "tags",
+    ):
+        raise InvalidInputError("Updating tags failed.", "UpdateFailed")
+    return Response(status_code=205)
+
+
+@router.delete(
+    "/collections/{collection_id}/tags",
+    summary="Delete a collection tag",
+    tags=["Collection Metadata"],
+)
+def delete_collection_tag(
+    collection_id: str,
+    tag: str = Query(..., max_length=1024),
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from urllib.parse import unquote
+
+    collection = _resolve_collection_for_owner(db, collection_id, account["uuid"])
+    target = unquote(tag)
+    existing = db.tags(
+        item_uri=collection["uri"], account_uuid=account["uuid"], limit=10000,
+    )
+    tags = [t["tag"] for t in existing]
+    try:
+        tags.remove(target)
+    except ValueError:
+        raise NotFoundError()
+    if not db.update_item_list(
+        collection["uuid"], account["uuid"], tags, "tags",
+    ):
+        raise InvalidInputError(
+            f"Deleting tag '{target}' failed.", "DeleteFailed",
+        )
+    return Response(status_code=204)
 
 
 # --- Explorer (admin-only) ---
@@ -922,23 +1094,29 @@ def explore_types(account=Depends(require_admin), db=Depends(get_db)):
 
 @router.get("/explore/properties", summary="List data model properties", tags=["Explorer"])
 def explore_properties(
-    uri: str = Query("", max_length=255),
+    uri: str = Query(None, max_length=255),
     account=Depends(require_admin),
     db=Depends(get_db),
 ):
     from urllib.parse import unquote
+    # AS-IS (#111): legacy unquotes the `uri` parameter unconditionally; when it
+    # is absent the value is None and unquote(None) raises TypeError, which the
+    # handler's `except ValidationException` does not catch -> uncaught -> 500.
     properties = db.properties_for_type(unquote(uri))
     return JSONResponse(content=[p["predicate"] for p in properties])
 
 
 @router.get("/explore/property_value_types", summary="List property value types", tags=["Explorer"])
 def explore_property_value_types(
-    type: str = Query("", max_length=255),
-    property: str = Query("", max_length=255),
+    type: str = Query(None, max_length=255),
+    property: str = Query(None, max_length=255),
     account=Depends(require_admin),
     db=Depends(get_db),
 ):
     from urllib.parse import unquote
+    # AS-IS (#111): legacy unquotes `type`/`property` unconditionally; when they
+    # are absent the values are None and unquote(None) raises TypeError, which
+    # the handler's `except ValidationException` does not catch -> 500.
     types = db.types_for_property(unquote(type), unquote(property))
     return JSONResponse(content=[t["type"] for t in types])
 

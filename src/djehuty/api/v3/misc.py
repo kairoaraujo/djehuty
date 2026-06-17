@@ -60,12 +60,22 @@ def search_accounts(
     # Legacy reads the filter dict from the JSON body (POST).
     if not isinstance(body, dict):
         body = {}
-    records = db.accounts(
-        search_for=body.get("search_for"),
-        limit=body.get("limit", 10),
-        offset=body.get("offset", 0),
+    # AS-IS (#111): legacy reads `exclude` via array_value(required=False),
+    # which returns None when the field is absent, then evaluates
+    # `account["uuid"] in exclude` -> `... in None` -> TypeError. That is not
+    # caught by legacy's `except (ValidationException, KeyError)`, so it
+    # propagates -> HTTP 500 whenever the search matches at least one account.
+    # Reproduce faithfully: no guard on `exclude`.
+    search_for = body.get("search_for")
+    exclude = body.get("exclude")
+    accounts = db.accounts(search_for=search_for, limit=5)
+    for index, _ in enumerate(accounts):
+        record = accounts[index]
+        if record["uuid"] in exclude:
+            accounts.pop(index)
+    return JSONResponse(
+        content=[formatter.format_account_details_record(r) for r in accounts]
     )
-    return JSONResponse(content=[formatter.format_account_record(r) for r in records])
 
 
 @router.get("/authors/{author_uuid}", summary="Get author details", tags=["Authors"])
@@ -81,10 +91,56 @@ def get_author_details(author_uuid: str, db=Depends(get_db)):
 
 
 @router.get("/ro-crates", summary="List RO-Crate enabled datasets", tags=["RO-Crates"])
-def list_ro_crates(db=Depends(get_db)):
-    records = db.datasets(is_latest=True, limit=100)
-    uuids = [r.get("container_uuid") for r in records if r.get("container_uuid")]
-    return JSONResponse(content=uuids)
+def list_ro_crates(
+    db=Depends(get_db),
+    page: str | None = Query(None),
+    page_size: str | None = Query(None),
+    limit: str | None = Query(None),
+    offset: str | None = Query(None),
+    modified_since: str | None = Query(None, max_length=32),
+    order: str | None = Query(None, max_length=255),
+    order_direction: str | None = Query(None, max_length=8),
+):
+    from djehuty.web import validator
+
+    # AS-IS (#111): two legacy bugs reproduced here.
+    #  1. paging_to_offset_and_limit() calls integer_value() WITHOUT forwarding
+    #     error_list, so an invalid `limit` RAISES InvalidIntegerValue instead
+    #     of returning a 400; the legacy handler doesn't wrap the paging call in
+    #     a try, so it propagates -> HTTP 500. (Hence `limit` is taken as a raw
+    #     string here, not coerced/validated by FastAPI.)
+    #  2. format_rocrate_record() subscripts record['doi'] unguarded
+    #     (KeyError -> uncaught -> HTTP 500) for datasets without a DOI.
+    errors: list = []
+    offset_v, limit_v = validator.paging_to_offset_and_limit(
+        {"page": page, "page_size": page_size, "limit": limit, "offset": offset},
+        error_list=errors,
+    )
+
+    datasets = db.datasets(
+        is_published=True,
+        is_latest=True,
+        is_embargoed=False,
+        is_restricted=False,
+        modified_since=modified_since,
+        order=order,
+        order_direction=order_direction,
+        limit=limit_v,
+        offset=offset_v,
+    )
+    output = []
+    for dataset in datasets:
+        output.append(formatter.format_rocrate_record(
+            config.base_url,
+            config.site_name,
+            dataset,
+            config.publisher_rors.get(config.site_name),
+            tags=db.tags(item_uri=dataset["uri"], limit=None),
+            authors=db.authors(item_uri=dataset["uri"], is_published=True,
+                               item_type="dataset", limit=10000),
+            files=db.dataset_files(dataset_uri=dataset["uri"]),
+        ))
+    return JSONResponse(content=output)
 
 
 @router.get(
@@ -223,15 +279,22 @@ def _render_doi_badge(db, dataset_id: str, version: int | None) -> Response:
         else:
             params["is_latest"] = True
 
-        dataset = db.datasets(**params)[0]
+        # AS-IS (#111): legacy resolves the dataset via __dataset_by_id_or_uri,
+        # which returns None for a missing dataset; the subsequent
+        # None["container_doi"] raises TypeError, which legacy's bare
+        # `except KeyError` does not catch -> uncaught -> HTTP 500. Reproduce:
+        # no IndexError guard, and only KeyError maps to 404 (existing dataset
+        # whose record lacks the doi key).
+        results = db.datasets(**params)
+        dataset = results[0] if results else None
         doi = dataset["container_doi"] if version is None else dataset["doi"]
         body = _jinja_env.get_template("badge.svg").render(
             doi=doi,
             version=version,
-            color=config.colors.get("primary-color", "#000000"),
+            color=config.colors["primary-color"],
         )
         return Response(content=body, media_type="image/svg+xml")
-    except (IndexError, KeyError, AttributeError):
+    except KeyError:
         raise NotFoundError()
 
 

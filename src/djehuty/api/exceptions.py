@@ -56,8 +56,11 @@ def register_exception_handlers(app: FastAPI):
     @app.exception_handler(AuthorizationError)
     async def authorization_handler(request: Request, exc: AuthorizationError):
         return JSONResponse(
-            status_code=401,
-            content={"message": "Invalid or unknown session token"},
+            status_code=403,
+            content={
+                "message": "Invalid or unknown session token",
+                "code": "InvalidSessionToken",
+            },
         )
 
     @app.exception_handler(ForbiddenError)
