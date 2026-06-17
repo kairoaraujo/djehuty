@@ -20,6 +20,18 @@ from djehuty.web.config import config
 _log = logging.getLogger(__name__)
 
 
+def image_mimetype(file_path) -> str | None:
+    """Return the MIME type of ``file_path`` if PIL can identify it as an image.
+
+    Returns ``None`` for missing files or formats PIL does not recognise.
+    """
+    try:
+        with Image.open(file_path) as image:
+            return image.get_format_mimetype()
+    except (FileNotFoundError, UnidentifiedImageError, OSError):
+        return None
+
+
 def generate_thumbnail(
     input_filename,
     dataset_uuid: str,
