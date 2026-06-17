@@ -42,19 +42,193 @@ def _resolve_dataset(db, dataset_id, account_uuid):
 @router.put(
     "/datasets/{dataset_id}/submit-for-review",
     summary="Submit dataset for review",
-    description="Submit a draft dataset for curator review before publication.",
+    description=(
+        "Submit a draft dataset for curator review before publication. "
+        "Performs metadata validation, persists the supplied metadata "
+        "(``db.update_dataset``), and registers a review record "
+        "(``db.insert_review``)."
+    ),
 )
 def submit_for_review(
     dataset_id: str,
-    body: dict | None = None,
+    body: dict,
     account=Depends(require_auth),
     db=Depends(get_db),
 ):
-    dataset = _resolve_dataset(db, dataset_id, account["uuid"])
-    result = db.submit_dataset_for_review(dataset["uri"], account["uuid"])
-    if not result:
-        raise InvalidInputError("Failed to submit for review.", "SubmitFailed")
-    return Response(status_code=204)
+    from djehuty.utils.convenience import value_or, value_or_none
+    from djehuty.web import validator
+    from djehuty.web.convenience import normalize_doi
+
+    if not isinstance(body, dict):
+        raise InvalidInputError("Request body must be a JSON object.", "BadBody")
+
+    account_uuid = account["uuid"]
+    dataset = _resolve_dataset(db, dataset_id, account_uuid)
+
+    if value_or(dataset, "is_shared_with_me", False):
+        raise ForbiddenError(
+            "Collaborators cannot submit a dataset for review."
+        )
+
+    try:
+        dataset_type = validator.string_value(body, "defined_type", 0, 16)
+        defined_type = 0
+        if dataset_type == "software":
+            defined_type = 9
+        elif dataset_type == "dataset":
+            defined_type = 3
+
+        errors: list = []
+        is_embargoed = validator.boolean_value(body, "is_embargoed", when_none=False)
+        embargo_options = validator.array_value(body, "embargo_options")
+        embargo_option = value_or_none(embargo_options, 0)
+        is_restricted = value_or(embargo_option, "id", 0) == 1000
+        is_closed = value_or(embargo_option, "id", 0) == 1001
+        is_temporary_embargo = is_embargoed and not is_restricted and not is_closed
+        agreed_to_deposit_agreement = validator.boolean_value(
+            body, "agreed_to_deposit_agreement", True, False, errors
+        )
+        agreed_to_publish = validator.boolean_value(
+            body, "agreed_to_publish", True, False, errors
+        )
+
+        if is_restricted or is_closed:
+            body["embargo_type"] = "file"
+
+        if not agreed_to_deposit_agreement:
+            errors.append({
+                "field_name": "agreed_to_deposit_agreement",
+                "message": "The dataset cannot be published without agreeing to the Deposit Agreement.",
+            })
+
+        if not agreed_to_publish:
+            errors.append({
+                "field_name": "agreed_to_publish",
+                "message": "The dataset cannot be published without giving the reviewer permission to do so.",
+            })
+
+        authors = db.authors(item_uri=dataset["uri"], item_type="dataset")
+        if not authors:
+            errors.append({
+                "field_name": "authors",
+                "message": "The dataset must have at least one author.",
+            })
+
+        tags = db.tags(item_uri=dataset["uri"], account_uuid=account_uuid)
+        if not tags:
+            errors.append({
+                "field_name": "tag",
+                "message": "The dataset must have at least one keyword.",
+            })
+
+        categories = db.categories(
+            item_uri=dataset["uri"],
+            account_uuid=account_uuid,
+            is_published=False,
+            limit=None,
+        )
+        if not categories:
+            errors.append({
+                "field_name": "categories",
+                "message": "Please specify at least one category.",
+            })
+
+        resource_doi = normalize_doi(
+            validator.string_value(body, "resource_doi", 0, 255, False)
+        )
+        if not validator.is_valid_doi(resource_doi):
+            errors.append({
+                "field_name": "resource_doi",
+                "message": "Please enter a valid DOI.",
+            })
+
+        codecheck_certificate_doi = normalize_doi(
+            validator.string_value(body, "codecheck_certificate_doi", 0, 255, False)
+        )
+        if not validator.is_valid_doi(codecheck_certificate_doi):
+            errors.append({
+                "field_name": "codecheck_certificate_doi",
+                "message": "Please enter a valid DOI.",
+            })
+
+        license_id = validator.integer_value(body, "license_id", 0, pow(2, 63), True, errors)
+        license_url = db.license_url_by_id(license_id) if license_id else None
+
+        parameters = {
+            "dataset_uuid":       dataset["uuid"],
+            "account_uuid":       account_uuid,
+            "title":              validator.string_value(body, "title", 3, 1000, True, errors),
+            "description":        validator.string_value(body, "description", 0, 10000, True, errors, strip_html=False),
+            "resource_doi":       resource_doi,
+            "resource_title":     validator.string_value(body, "resource_title", 0, 255, False, errors),
+            "license_url":        license_url,
+            "group_id":           validator.integer_value(body, "group_id", 0, pow(2, 63), True, errors),
+            "time_coverage":      validator.string_value(body, "time_coverage", 0, 512, False, errors),
+            "publisher":          validator.string_value(body, "publisher", 0, 10000, True, errors),
+            "language":           validator.string_value(body, "language", 0, 10, True, errors),
+            "contributors":       validator.string_value(body, "contributors", 0, 10000, False, errors),
+            "license_remarks":    validator.string_value(body, "license_remarks", 0, 10000, False, errors),
+            "geolocation":        validator.string_value(body, "geolocation", 0, 255, False, errors),
+            "longitude":          validator.string_value(body, "longitude", 0, 64, False, errors),
+            "latitude":           validator.string_value(body, "latitude", 0, 64, False, errors),
+            "mimetype":           validator.string_value(body, "format", 0, 512, False, errors),
+            "data_link":          validator.string_value(body, "data_link", 0, 255, False, errors),
+            "derived_from":       validator.string_value(body, "derived_from", 0, 255, False, errors),
+            "same_as":            validator.string_value(body, "same_as", 0, 255, False, errors),
+            "organizations":      validator.string_value(body, "organizations", 0, 2048, False, errors),
+            "is_embargoed":       is_embargoed,
+            "is_restricted":      is_restricted,
+            "is_metadata_record": validator.boolean_value(body, "is_metadata_record", when_none=False),
+            "metadata_reason":    validator.string_value(body, "metadata_reason", 0, 512, strip_html=False),
+            "embargo_until_date": validator.date_value(body, "embargo_until_date", is_temporary_embargo, errors),
+            "embargo_type":       validator.options_value(body, "embargo_type", validator.embargo_types, is_temporary_embargo, errors),
+            "embargo_title":      validator.string_value(body, "embargo_title", 0, 1000, is_embargoed, errors),
+            "embargo_reason":     validator.string_value(body, "embargo_reason", 0, 10000, is_embargoed, errors, strip_html=False),
+            "eula":               validator.string_value(body, "eula", 0, 50000, is_restricted, errors, strip_html=False),
+            "defined_type_name":  dataset_type,
+            "defined_type":       defined_type,
+            "agreed_to_deposit_agreement": agreed_to_deposit_agreement,
+            "agreed_to_publish":  agreed_to_publish,
+            "categories":         validator.array_value(body, "categories", True, errors),
+            "requested_codecheck": validator.boolean_value(body, "requested_codecheck", False, False),
+            "codecheck_certificate_doi": codecheck_certificate_doi,
+        }
+
+        if not parameters["is_metadata_record"]:
+            files = db.dataset_files(
+                account_uuid=account_uuid,
+                dataset_uri=dataset["uri"],
+                limit=1,
+            )
+            if not files and parameters["defined_type_name"] != "software":
+                errors.append({
+                    "field_name": "files",
+                    "message": "Upload at least one file, or choose metadata-only record.",
+                })
+
+        if errors:
+            raise InvalidInputError(errors, "ValidationFailed")
+
+        account_record = db.account_by_uuid(dataset["account_uuid"])
+        if not account_record:
+            raise InvalidInputError(
+                "Dataset owner account not found.", "AccountMissing"
+            )
+
+        if not db.update_dataset(**parameters):
+            raise InvalidInputError(
+                "Failed to persist dataset metadata.", "UpdateFailed"
+            )
+
+        if db.insert_review(dataset["uri"]) is None:
+            raise InvalidInputError(
+                "Failed to register review record.", "InsertReviewFailed"
+            )
+
+        return Response(status_code=204)
+
+    except validator.ValidationException as error:
+        raise InvalidInputError(error.message, error.code)
 
 
 @router.post(
