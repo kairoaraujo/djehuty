@@ -694,6 +694,11 @@ def read_email_configuration (server, xml_root, logger):
             logger.error ("Could not configure the email subsystem:")
             logger.error ("The email port should be a numeric value.")
 
+    # Share the configured EmailInterface with djehuty.email so the FastAPI
+    # handlers send through the same SMTP credentials as the legacy server.
+    from djehuty import email as email_module
+    email_module.register_interface(server.email)
+
 def read_upload_dataset_configuration (xml_root, logger):
     """Procedure to parse and set the upload dataset configuration."""
     upload_dataset = xml_root.find("upload-dataset")
