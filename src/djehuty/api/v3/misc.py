@@ -8,8 +8,9 @@ from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import FileResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from djehuty.web import formatter
+from djehuty.web import formatter, validator
 from djehuty.web.config import config
+from djehuty.utils.convenience import parses_to_int
 from djehuty.api.dependencies import get_db, require_auth
 from djehuty.api.exceptions import InvalidInputError, NotFoundError, ForbiddenError
 
@@ -262,31 +263,42 @@ def list_codemeta(
 # DOI badges — SVG image rendered from the badge.svg template
 # ---------------------------------------------------------------------------
 
-def _render_doi_badge(db, dataset_id: str, version: int | None) -> Response:
-    from djehuty.web import validator
+def _dataset_by_id_or_uri(db, identifier: str, version: int | None):
+    """Resolve a published dataset by numeric id or container UUID.
+
+    Faithful port of the legacy ``__dataset_by_id_or_uri`` helper: returns the
+    matching record, or ``None`` when the identifier is unknown or malformed
+    (neither an integer nor a UUID). AS-IS (#111): the DOI-badge handler
+    dereferences the result without a None guard, so an unknown dataset flows
+    into ``None[...]`` -> TypeError -> HTTP 500, exactly as legacy.
+    """
+    parameters = {
+        "is_published": True,
+        "is_latest": False,
+        "is_under_review": None,
+        "version": version,
+        "account_uuid": None,
+        "use_cache": True,
+        "limit": 1,
+    }
     try:
-        if validator.is_valid_uuid(dataset_id):
-            params: dict = {"container_uuid": dataset_id, "limit": 1}
-        else:
-            try:
-                params = {"dataset_id": int(dataset_id), "limit": 1}
-            except (ValueError, TypeError):
-                raise NotFoundError()
+        if parses_to_int(identifier):
+            return db.datasets(dataset_id=int(identifier), **parameters)[0]
+        if validator.is_valid_uuid(identifier):
+            return db.datasets(container_uuid=identifier, **parameters)[0]
+        return None
+    except IndexError:
+        return None
 
-        if version is not None:
-            params["version"] = version
-            params["is_latest"] = False
-        else:
-            params["is_latest"] = True
 
-        # AS-IS (#111): legacy resolves the dataset via __dataset_by_id_or_uri,
-        # which returns None for a missing dataset; the subsequent
-        # None["container_doi"] raises TypeError, which legacy's bare
-        # `except KeyError` does not catch -> uncaught -> HTTP 500. Reproduce:
-        # no IndexError guard, and only KeyError maps to 404 (existing dataset
-        # whose record lacks the doi key).
-        results = db.datasets(**params)
-        dataset = results[0] if results else None
+def _render_doi_badge(db, dataset_id: str, version: int | None) -> Response:
+    # AS-IS (#111): faithful port of legacy api_v3_doi_badge. The dataset is
+    # resolved with no None guard, so an unknown or malformed identifier
+    # crashes on None[...] (TypeError -> HTTP 500); only a missing doi key
+    # (KeyError) on an existing record maps to 404, mirroring legacy's bare
+    # `except KeyError`.
+    try:
+        dataset = _dataset_by_id_or_uri(db, dataset_id, version)
         doi = dataset["container_doi"] if version is None else dataset["doi"]
         body = _jinja_env.get_template("badge.svg").render(
             doi=doi,
