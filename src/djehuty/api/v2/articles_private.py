@@ -667,20 +667,29 @@ def publish_article(
 
 # --- Author / Funding search ---
 
-@router.get(
+@router.post(
     "/authors/search",
     summary="Search authors",
-    description="Search for authors by name. Used for author autocomplete.",
+    description="Search for authors by name. Used for author autocomplete. Admin-only.",
     tags=["Author Search"],
 )
 def search_authors(
-    search: str = Query(..., max_length=255),
+    body: dict,
     account=Depends(require_auth),
     db=Depends(get_db),
-    limit: int = Query(10, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
 ):
-    records = db.authors(search_for=search, limit=limit, offset=offset)
+    # Legacy gates this behind may_administer and reads ``search`` from the
+    # JSON body (POST).
+    from djehuty.web import validator
+
+    search_for = body.get("search") if isinstance(body, dict) else None
+    if not isinstance(search_for, str) or len(search_for) > 255:
+        raise InvalidInputError(
+            "Field 'search' is required and must be a string of <= 255 chars.",
+            "BadSearch",
+        )
+
+    records = db.authors(search_for=search_for, limit=10)
     return JSONResponse(content=[formatter.format_author_details_record(r) for r in records])
 
 
@@ -721,22 +730,35 @@ def search_funding(
 # --- Institution endpoints ---
 
 @router.get("/institution", summary="Get institution details", tags=["Institution"])
-def get_institution(account=Depends(require_auth), db=Depends(get_db)):
-    institution = db.institution(account_uuid=account["uuid"])
-    if institution is None:
-        raise NotFoundError()
-    return JSONResponse(content=institution)
+def get_institution(account=Depends(require_auth)):
+    # Djehuty only serves one institution; the response is hardcoded the
+    # same way the legacy does it.
+    return JSONResponse(content={"id": 898, "name": config.site_name})
 
 
 @router.get("/institution/accounts", summary="List institution accounts", tags=["Institution"])
 def list_institution_accounts(
-    account=Depends(require_auth),
+    token: str | None = Depends(get_token),
     db=Depends(get_db),
     paging: dict = Depends(pagination_params),
+    institution_user_id: str | None = Query(None, max_length=4096),
+    is_active: int | None = Query(None, ge=0, le=1),
+    email: str | None = Query(None, max_length=4096),
+    id_lte: int | None = Query(None, ge=0),
+    id_gte: int | None = Query(None, ge=0),
 ):
-    accounts = db.institution_accounts(
-        account_uuid=account["uuid"],
-        limit=paging["limit"], offset=paging["offset"],
+    # Legacy gates this on may_administer (admin-only listing).
+    if not token or not db.may_administer(token):
+        raise ForbiddenError("Administrator permissions required.")
+
+    accounts = db.accounts(
+        limit=paging["limit"],
+        offset=paging["offset"],
+        institution_user_id=institution_user_id,
+        is_active=is_active,
+        email=email,
+        id_lte=id_lte,
+        id_gte=id_gte,
     )
     return JSONResponse(content=[formatter.format_account_record(a) for a in accounts])
 
@@ -747,6 +769,15 @@ def get_institution_account(
     account=Depends(require_auth),
     db=Depends(get_db),
 ):
+    from djehuty.utils.convenience import parses_to_int
+    from djehuty.web import validator
+
+    # Reject ids that are neither integer nor UUID.
+    if not parses_to_int(account_id) and not validator.is_valid_uuid(account_id):
+        raise InvalidInputError(
+            "'id' must be either an integer or a UUID.", "InvalidAccountId",
+        )
+
     user = db.account_by_uuid(account_id)
     if user is None:
         raise NotFoundError()

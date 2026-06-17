@@ -11,6 +11,7 @@ from djehuty.web.config import config
 from djehuty.api.dependencies import (
     get_current_account,
     get_db,
+    get_token,
     require_admin,
     require_auth,
     resolve_reviewer_context,
@@ -706,7 +707,22 @@ async def upload_file(
 
 @router.get("/datasets/{container_uuid}/collaborators", summary="List collaborators", tags=["Collaborators"])
 def list_collaborators(container_uuid: str, account=Depends(require_auth), db=Depends(get_db)):
-    collaborators = db.collaborators(container_uuid=container_uuid, account_uuid=account["uuid"])
+    # First resolve the container to its dataset_uuid (which is what
+    # db.collaborators expects).
+    try:
+        dataset = db.datasets(
+            container_uuid=container_uuid,
+            account_uuid=account["uuid"],
+            is_published=None,
+            is_latest=None,
+            limit=1,
+        )[0]
+    except (IndexError, AttributeError):
+        raise NotFoundError()
+
+    collaborators = db.collaborators(
+        dataset_uuid=dataset["uuid"], account_uuid=account["uuid"]
+    )
     return JSONResponse(content=[formatter.format_collaborator_record(c) for c in collaborators])
 
 
@@ -739,11 +755,28 @@ def delete_collaborator(container_uuid: str, collaborator_uuid: str, account=Dep
 # --- Authors (v3 format) ---
 
 @router.get("/datasets/{container_uuid}/authors", summary="List dataset authors (v3)", tags=["Dataset Authors"])
-def list_dataset_authors_v3(container_uuid: str, db=Depends(get_db)):
+def list_dataset_authors_v3(
+    container_uuid: str,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    # Owners can see authors on any state (draft / published); readers only
+    # on published.
     try:
-        dataset = db.datasets(container_uuid=container_uuid, is_latest=None)[0]
+        dataset = db.datasets(
+            container_uuid=container_uuid,
+            account_uuid=account["uuid"],
+            is_latest=None,
+            is_published=None,
+            limit=1,
+        )[0]
     except (IndexError, AttributeError):
-        raise NotFoundError()
+        try:
+            dataset = db.datasets(
+                container_uuid=container_uuid, is_latest=True, limit=1,
+            )[0]
+        except (IndexError, AttributeError):
+            raise NotFoundError()
     authors = db.authors(item_uri=dataset["uri"], item_type="dataset", limit=10000)
     return JSONResponse(content=[formatter.format_author_record_v3(a) for a in authors])
 
@@ -786,7 +819,7 @@ def list_reviews(account=Depends(require_auth), db=Depends(get_db)):
 
 @router.get("/reviewers", summary="List reviewers", tags=["Reviews"])
 def list_reviewers(account=Depends(require_auth), db=Depends(get_db)):
-    reviewers = db.reviewers()
+    reviewers = db.reviewer_accounts()
     return JSONResponse(content=[formatter.format_account_record(r) for r in reviewers])
 
 
@@ -870,38 +903,106 @@ def list_collection_tags(collection_id: str, db=Depends(get_db)):
     return JSONResponse(content=[formatter.format_tag_record(t) for t in tags])
 
 
-# --- Explorer ---
+# --- Explorer (admin-only) ---
 
 @router.get("/explore/types", summary="List data model types", tags=["Explorer"])
-def explore_types(db=Depends(get_db)):
-    records = db.explorer_types()
-    return JSONResponse(content=records)
+def explore_types(account=Depends(require_admin), db=Depends(get_db)):
+    types = db.types()
+    return JSONResponse(content=[t["type"] for t in types])
 
 
 @router.get("/explore/properties", summary="List data model properties", tags=["Explorer"])
-def explore_properties(db=Depends(get_db)):
-    records = db.explorer_properties()
-    return JSONResponse(content=records)
+def explore_properties(
+    uri: str = Query("", max_length=255),
+    account=Depends(require_admin),
+    db=Depends(get_db),
+):
+    from urllib.parse import unquote
+    properties = db.properties_for_type(unquote(uri))
+    return JSONResponse(content=[p["predicate"] for p in properties])
 
 
 @router.get("/explore/property_value_types", summary="List property value types", tags=["Explorer"])
-def explore_property_value_types(db=Depends(get_db)):
-    records = db.explorer_property_types()
-    return JSONResponse(content=records)
+def explore_property_value_types(
+    type: str = Query("", max_length=255),
+    property: str = Query("", max_length=255),
+    account=Depends(require_admin),
+    db=Depends(get_db),
+):
+    from urllib.parse import unquote
+    types = db.types_for_property(unquote(type), unquote(property))
+    return JSONResponse(content=[t["type"] for t in types])
 
 
 @router.get("/explore/clear-cache", summary="Clear explorer cache", tags=["Explorer"])
 def explore_clear_cache(account=Depends(require_admin), db=Depends(get_db)):
-    db.cache.invalidate_all()
+    db.cache.invalidate_by_prefix("explorer_properties")
+    db.cache.invalidate_by_prefix("explorer_types")
+    db.cache.invalidate_by_prefix("explorer_property_types")
     return Response(status_code=204)
 
 
 # --- Admin ---
 
 @router.get("/admin/files-integrity-statistics", summary="File integrity statistics", tags=["Admin"])
-def files_integrity_statistics(account=Depends(require_admin), db=Depends(get_db)):
-    records = db.files_integrity_statistics()
-    return JSONResponse(content=records)
+def files_integrity_statistics(
+    token: str | None = Depends(get_token),
+    db=Depends(get_db),
+):
+    # Legacy gates this on may_review_integrity (a separate privilege from
+    # may_administer).
+    if not token or not db.may_review_integrity(token):
+        raise ForbiddenError("File-integrity reviewer permissions required.")
+
+    files = db.repository_file_statistics(extended_properties=True)
+    if not files:
+        return JSONResponse(content={"message": "No files to check."})
+
+    from djehuty.services.storage import filesystem_location
+    from djehuty.web import s3
+    from djehuty.utils.convenience import value_or
+
+    number_of_files = 0
+    number_of_inaccessible_files = 0
+    number_of_incomplete_metadata = 0
+    number_of_bytes = 0
+    number_of_links = 0
+    incomplete_metadata: list = []
+    missing_files: list = []
+
+    for entry in files:
+        if value_or(entry, "is_link_only", False):
+            number_of_links += 1
+            continue
+        number_of_files += 1
+        number_of_bytes += int(float(entry.get("bytes", 0)))
+        location = filesystem_location(entry)
+        available_on_s3 = isinstance(location, s3.S3DownloadStreamer)
+        if not (location or available_on_s3):
+            number_of_incomplete_metadata += 1
+            incomplete_metadata.append(value_or(entry, "uuid", "unknown"))
+            continue
+        if not (
+            (isinstance(location, str) and os.path.isfile(location))
+            or available_on_s3
+        ):
+            number_of_inaccessible_files += 1
+            missing_files.append(location)
+
+    return JSONResponse(content={
+        "number_of_links": number_of_links,
+        "number_of_files": number_of_files,
+        "number_of_bytes": number_of_bytes,
+        "number_of_accessible_files": number_of_files - number_of_inaccessible_files,
+        "number_of_inaccessible_files": number_of_inaccessible_files,
+        "number_of_incomplete_metadata": number_of_incomplete_metadata,
+        "percentage_accessible": (
+            (1.0 - (number_of_inaccessible_files / number_of_files)) * 100
+            if number_of_files else 100.0
+        ),
+        "incomplete_metadata": incomplete_metadata,
+        "missing_files": [str(f) for f in missing_files],
+    })
 
 
 @router.get("/admin/accounts/clear-cache", summary="Clear accounts cache", tags=["Admin"])
@@ -959,3 +1060,255 @@ def redirect_from_ssi(container_uuid: str, token: str):
         secure=config.in_production, httponly=True, samesite="lax",
     )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Dataset thumbnail / md5 repair
+# ---------------------------------------------------------------------------
+
+@router.put(
+    "/datasets/{dataset_id}/update-thumbnail",
+    summary="Set or clear the dataset thumbnail",
+    tags=["Dataset Files"],
+)
+def update_thumbnail(
+    dataset_id: str,
+    body: dict,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from djehuty.services.imaging import generate_thumbnail
+    from djehuty.services.storage import filesystem_location
+    from djehuty.utils.convenience import value_or
+    from djehuty.web import validator
+
+    dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+
+    try:
+        file_uuid = validator.string_value(body, "uuid", 0, 36, False)
+    except validator.ValidationException as error:
+        raise InvalidInputError(error.message, error.code)
+
+    # Empty UUID means "clear the thumbnail".
+    if file_uuid == "" or file_uuid is None:
+        if not db.dataset_update_thumb(
+            dataset["uuid"], account["uuid"], file_uuid, None,
+        ):
+            raise InvalidInputError("Failed to clear thumbnail.", "ClearFailed")
+        return Response(status_code=205)
+
+    from djehuty.web import validator
+    if not validator.is_valid_uuid(file_uuid):
+        raise ForbiddenError("Invalid file UUID.")
+
+    try:
+        metadata = db.dataset_files(
+            file_uuid=file_uuid, account_uuid=account["uuid"], limit=1,
+        )[0]
+    except (IndexError, AttributeError):
+        raise NotFoundError()
+
+    if value_or(metadata, "size", 0) >= 10_000_000:
+        raise InvalidInputError(
+            "Cannot create thumbnails for images larger than 10MB.",
+            "ImageTooLarge",
+        )
+
+    input_filename = filesystem_location(metadata)
+    if input_filename is None:
+        raise NotFoundError()
+
+    extension = generate_thumbnail(input_filename, dataset["uuid"])
+    if extension is None:
+        raise InvalidInputError(
+            "Failed to generate thumbnail.", "ThumbnailFailed"
+        )
+
+    if not db.dataset_update_thumb(
+        dataset["uuid"], account["uuid"], file_uuid, extension,
+    ):
+        raise InvalidInputError(
+            "Failed to update thumbnail metadata.", "UpdateFailed"
+        )
+    return Response(status_code=205)
+
+
+@router.post(
+    "/datasets/{container_uuid}/repair_md5s",
+    summary="Recompute MD5 checksums for files missing them",
+    tags=["Admin"],
+)
+def repair_md5s(
+    container_uuid: str,
+    token: str | None = Depends(get_token),
+    db=Depends(get_db),
+):
+    import hashlib
+
+    if not token or not db.may_administer(token):
+        raise ForbiddenError("Administrator permissions required.")
+
+    try:
+        dataset = db.datasets(
+            container_uuid=container_uuid, is_published=False, limit=1,
+        )[0]
+        account_uuid = dataset["account_uuid"]
+    except (IndexError, AttributeError, KeyError) as error:
+        raise InvalidInputError(
+            f"Cannot find dataset or account UUID: {error}", "ResolveFailed"
+        )
+
+    files = db.missing_checksummed_files_for_container(container_uuid)
+    for row in files:
+        file_uuid = row["file_uuid"]
+        filename = os.path.join(config.storage, f"{container_uuid}_{file_uuid}")
+        md5 = hashlib.new("md5", usedforsecurity=False)
+        with open(filename, "rb") as stream:
+            for chunk in iter(lambda f=stream: f.read(4096), b""):
+                md5.update(chunk)
+            computed = md5.hexdigest()
+            db.update_file(
+                account_uuid, file_uuid, dataset["uuid"],
+                computed_md5=computed,
+                filesystem_location=filename,
+            )
+
+    return JSONResponse(
+        content={"message": "The MD5 sums have been regenerated."},
+        status_code=201,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Collection workflow
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/collections/{container_uuid}/reorder-authors",
+    summary="Reorder collection authors",
+    tags=["Collections"],
+)
+def collection_reorder_authors(
+    container_uuid: str,
+    body: dict,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from djehuty.web import validator
+
+    if not validator.is_valid_uuid(container_uuid):
+        raise NotFoundError()
+    if not isinstance(body, dict):
+        raise InvalidInputError("Request body must be a JSON object.", "BadBody")
+
+    direction = body.get("direction")
+    if direction not in ("up", "down"):
+        raise InvalidInputError(
+            "direction must be 'up' or 'down'.", "BadDirection"
+        )
+    author_uuid = body.get("author")
+    if not author_uuid or not validator.is_valid_uuid(author_uuid):
+        raise InvalidInputError("author must be a valid UUID.", "BadAuthor")
+
+    if not db.reorder_authors(
+        account["uuid"], container_uuid, author_uuid, direction,
+    ):
+        raise InvalidInputError("Failed to reorder authors.", "ReorderFailed")
+    return Response(status_code=205)
+
+
+@router.post(
+    "/collections/{collection_id}/publish",
+    summary="Publish a draft collection",
+    tags=["Collections"],
+)
+def publish_collection(
+    collection_id: str,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+):
+    from djehuty.services import datacite
+    from djehuty.utils.convenience import value_or, value_or_none
+    from djehuty.web import validator
+
+    # Resolve the collection by id (numeric or UUID).
+    try:
+        if validator.is_valid_uuid(collection_id):
+            params = {"container_uuid": collection_id, "account_uuid": account["uuid"]}
+        else:
+            try:
+                params = {"collection_id": int(collection_id), "account_uuid": account["uuid"]}
+            except (ValueError, TypeError):
+                raise ForbiddenError("Invalid collection id.")
+        collection = db.collections(is_published=False, limit=1, **params)[0]
+    except (IndexError, AttributeError):
+        raise ForbiddenError("Collection not found or not owned.")
+
+    errors: list = []
+    validator.string_value(collection, "title", 3, 1000, True, errors)
+    validator.string_value(collection, "description", 0, 10000, True, errors)
+    validator.integer_value(collection, "group_id", 0, pow(2, 63), True, errors)
+    validator.string_value(collection, "time_coverage", 0, 512, False, errors)
+    validator.string_value(collection, "publisher", 0, 10000, True, errors)
+    validator.string_value(collection, "language", 0, 10, True, errors)
+    validator.string_value(collection, "resource_doi", 0, 255, False, errors)
+    validator.string_value(collection, "resource_title", 0, 255, False, errors)
+
+    authors = db.authors(item_uri=collection["uri"], item_type="collection")
+    if not authors:
+        errors.append({
+            "field_name": "authors",
+            "message": "The collection must have at least one author.",
+        })
+    tags = db.tags(item_uri=collection["uri"], account_uuid=account["uuid"])
+    if not tags:
+        errors.append({
+            "field_name": "tag",
+            "message": "The collection must have at least one keyword.",
+        })
+    categories = db.categories(
+        item_uri=collection["uri"],
+        account_uuid=account["uuid"],
+        is_published=False,
+        limit=None,
+    )
+    if not categories:
+        errors.append({
+            "field_name": "categories",
+            "message": "Please specify at least one category.",
+        })
+
+    if errors:
+        raise InvalidInputError(errors, "ValidationFailed")
+
+    container_uuid = collection["container_uuid"]
+    container = db.container(container_uuid, "collection")
+    new_version = value_or(container, "latest_published_version_number", 0) + 1
+
+    if config.in_production and not config.in_preproduction:
+        for version in (None, new_version):
+            reserved = datacite.reserve_and_save_doi(
+                db, account["uuid"], collection,
+                version=version, item_type="collection",
+            )
+            if not reserved:
+                raise InvalidInputError(
+                    f"Reserving DOI for {container_uuid} (version={version}) failed.",
+                    "DoiReserveFailed",
+                )
+            if not datacite.update_item_doi(
+                db, container_uuid,
+                version=version, item_type="collection",
+            ):
+                raise InvalidInputError(
+                    f"Updating DOI metadata for {container_uuid} (version={version}) failed.",
+                    "DoiUpdateFailed",
+                )
+
+    if not db.publish_collection(container_uuid, account["uuid"]):
+        raise InvalidInputError("Failed to publish collection.", "PublishFailed")
+
+    return JSONResponse(
+        content={"location": f"{config.base_url}/published/{collection_id}"},
+        status_code=201,
+    )
