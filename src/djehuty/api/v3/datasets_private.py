@@ -55,9 +55,8 @@ def submit_for_review(
     account=Depends(require_auth),
     db=Depends(get_db),
 ):
-    from djehuty.utils.convenience import value_or, value_or_none
+    from djehuty.utils.convenience import normalize_doi, value_or, value_or_none
     from djehuty.web import validator
-    from djehuty.web.convenience import normalize_doi
 
     if not isinstance(body, dict):
         raise InvalidInputError("Request body must be a JSON object.", "BadBody")
