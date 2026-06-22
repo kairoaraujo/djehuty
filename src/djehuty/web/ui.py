@@ -794,9 +794,14 @@ def read_configuration_file (server, config_file, logger, config_files):
             ssi_psk = ssi_psk.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
             config.ssi_psk = ssi_psk
 
-        api_service = config_value (xml_root, "api-service")
-        if api_service in ("new", "legacy"):
-            config.api_service = api_service
+        # The toggle was renamed from "api-service" to "web-service" once the
+        # FastAPI surface grew beyond the API (UI, auth, ...). Accept the old
+        # key as a back-compat alias.
+        web_service = config_value (xml_root, "web-service")
+        if web_service is None:
+            web_service = config_value (xml_root, "api-service")
+        if web_service in ("new", "legacy"):
+            config.web_service = web_service
 
         enable_query_audit_log = xml_root.find ("enable-query-audit-log")
         if enable_query_audit_log is not None:
@@ -1386,33 +1391,44 @@ def main (config_file=None, run_internal_server=True, initialize=True,
                 server.create_static_error_pages()
 
         wsgi_app = server
-        if config.api_service == "new":
+        if config.web_service == "new":
             try:
-                from djehuty.api import create_app as create_api_app
+                from djehuty.application import create_app as create_web_app
                 from a2wsgi import ASGIMiddleware
-                fastapi_app = create_api_app(server.db)
+                fastapi_app = create_web_app(server.db)
                 api_wsgi = ASGIMiddleware(fastapi_app)
 
-                class ApiDispatcher:
-                    """Routes /v2/ and /v3/ to FastAPI, everything else to legacy."""
+                class WebServiceDispatcher:
+                    """Routes migrated surfaces to FastAPI, everything else to legacy.
+
+                    The migration proceeds surface by surface: each prefix listed
+                    here is served by the new FastAPI app, while everything else
+                    falls through to the legacy Werkzeug server. Set
+                    ``web-service: legacy`` to disable the new stack entirely.
+                    """
+                    # Prefixes (startswith) served by the new FastAPI app.
+                    PREFIXES = ("/v2/", "/v3/", "/api/", "/saml/")
+                    # Exact paths served by the new FastAPI app.
+                    EXACT = ("/login", "/logout")
+
                     def __init__(self, legacy, api):
                         self.legacy = legacy
                         self.api = api
                     def __call__(self, environ, start_response):
                         path = environ.get("PATH_INFO", "")
-                        if (path.startswith("/v2/") or path.startswith("/v3/")
-                            or path.startswith("/api/")):
+                        if (path in self.EXACT or
+                            any(path.startswith(prefix) for prefix in self.PREFIXES)):
                             return self.api(environ, start_response)
                         return self.legacy(environ, start_response)
 
-                wsgi_app = ApiDispatcher(server, api_wsgi)
-                logger.info ("API service:             FastAPI (new)")
+                wsgi_app = WebServiceDispatcher(server, api_wsgi)
+                logger.info ("Web service:             FastAPI (new)")
             except ImportError as error:
-                logger.warning ("FastAPI not available (%s), falling back to legacy API.", error)
+                logger.warning ("FastAPI not available (%s), falling back to legacy.", error)
         else:
-            logger.info ("API service:             Werkzeug (legacy)")
-            logger.warning ("The legacy API (Werkzeug) is deprecated and will be "
-                            "removed after 2027-01-01. Set <api-service>new</api-service> "
+            logger.info ("Web service:             Werkzeug (legacy)")
+            logger.warning ("The legacy web service (Werkzeug) is deprecated and will be "
+                            "removed after 2027-01-01. Set <web-service>new</web-service> "
                             "in the configuration file to switch to the FastAPI implementation.")
 
         run_simple (config.address, config.port, wsgi_app,

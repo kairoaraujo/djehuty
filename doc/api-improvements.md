@@ -6,7 +6,8 @@ best practices. These are **not bugs in the migration** — they are fixes
 to incorrect behavior in the legacy API.
 
 Downstream forks and API clients should review this list when migrating
-from `<api-service>legacy</api-service>` to `<api-service>new</api-service>`.
+from `<web-service>legacy</web-service>` to `<web-service>new</web-service>`
+(the old `<api-service>` key is still accepted as an alias).
 
 ---
 

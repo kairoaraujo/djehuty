@@ -1,16 +1,18 @@
 """Architectural guardrail for the FastAPI migration.
 
-The new ``djehuty.api`` package is a framework-based, AS-IS reimplementation of
-the endpoints currently served by the legacy ``djehuty.web.wsgi`` application.
-A core goal of the migration is that ``wsgi.py`` can eventually be deleted in a
-single, fearless step. That is only safe if the dependency direction stays
-one-way: ``djehuty.api`` may depend on the framework-neutral shared core
-(``djehuty.web.{validator,formatter,config,locks,s3,database}`` and
-``djehuty.services``), but it must NEVER import the legacy WSGI app itself.
+The new FastAPI surfaces (``djehuty.api``, ``djehuty.auth``,
+``djehuty.application`` and the framework-neutral ``djehuty.services``) are an
+AS-IS reimplementation of what the legacy ``djehuty.web.wsgi`` application
+serves. A core goal of the migration is that ``wsgi.py`` can eventually be
+deleted in a single, fearless step. That is only safe if the dependency
+direction stays one-way: the new code may depend on the framework-neutral
+shared core (``djehuty.web.{validator,formatter,config,locks,s3,database,
+email_handler}`` and ``djehuty.services``), but it must NEVER import the legacy
+WSGI app itself.
 
 This test pins that invariant down so it cannot regress silently. If it fails,
-a new-API module reached back into ``djehuty.web.wsgi`` -- move the needed code
-into the neutral core (or ``djehuty.services``) instead.
+a new-stack module reached back into ``djehuty.web.wsgi`` -- move the needed
+code into the neutral core (or ``djehuty.services``) instead.
 """
 
 import ast
@@ -21,11 +23,19 @@ import pytest
 
 LEGACY_WSGI_MODULE = "djehuty.web.wsgi"
 
+# Every new package that must stay independent of the legacy WSGI app.
+NEW_PACKAGES = ("djehuty.api", "djehuty.auth", "djehuty.services")
+
 
 def _api_python_files() -> list[Path]:
-    api_pkg = importlib.import_module("djehuty.api")
-    api_dir = Path(api_pkg.__file__).parent
-    return sorted(api_dir.rglob("*.py"))
+    files: list[Path] = []
+    for package in NEW_PACKAGES:
+        pkg = importlib.import_module(package)
+        files.extend(Path(pkg.__file__).parent.rglob("*.py"))
+    # The umbrella assembler is a single module, not a package.
+    application = importlib.import_module("djehuty.application")
+    files.append(Path(application.__file__))
+    return sorted(set(files))
 
 
 def _imported_modules(tree: ast.AST) -> set[str]:
