@@ -14,10 +14,12 @@ from fastapi import FastAPI
 
 
 def create_app(db) -> FastAPI:
-    """Create the umbrella FastAPI app (API + auth + future surfaces)."""
+    """Create the umbrella FastAPI app (API + auth + UI pages + future surfaces)."""
     from djehuty.api import create_app as create_api_app
     from djehuty.auth import router as auth_router
+    from djehuty.views.router import router as views_router
 
     app = create_api_app(db)
     app.include_router(auth_router)
+    app.include_router(views_router)
     return app

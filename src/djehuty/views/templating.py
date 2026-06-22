@@ -104,3 +104,12 @@ def render_template(db, token, impersonator_token, path, template_name, **contex
     """Render ``template_name`` with the shared page context, returning HTML."""
     template = jinja.get_template(template_name)
     return template.render(page_context(db, token, impersonator_token, path, **context))
+
+
+def render_plain_template(template_name, **context) -> str:
+    """Render ``template_name`` with only the given context (no page chrome).
+
+    Faithful to the legacy ``__render_{css,svg,xml}_template`` helpers, which
+    pass an explicit context and no logged-in/privilege information.
+    """
+    return jinja.get_template(template_name).render(context)

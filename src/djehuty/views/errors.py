@@ -10,27 +10,16 @@ empty body, also as legacy.
 import logging
 
 from fastapi import Request
-from fastapi.responses import (
-    Response,
-    JSONResponse,
-    PlainTextResponse,
-    HTMLResponse,
-)
+from fastapi.responses import Response, JSONResponse, PlainTextResponse
 
-from djehuty.web.config import config
 from djehuty.services.content_negotiation import accepts_html
-from djehuty.views.templating import render_template, COOKIE_KEY, IMPERSONATOR_COOKIE_KEY
+from djehuty.views.responses import render_page
 
 _log = logging.getLogger(__name__)
 
 
 def _html_error(db, request: Request, template_name: str, status_code: int) -> Response:
-    token        = request.cookies.get(COOKIE_KEY)
-    impersonator = request.cookies.get(IMPERSONATOR_COOKIE_KEY)
-    html = render_template(db, token, impersonator, request.url.path, template_name)
-    response = HTMLResponse(content=html, status_code=status_code)
-    response.headers["Server"] = config.site_name
-    return response
+    return render_page(db, request, template_name, status_code=status_code)
 
 
 def error_400(message, code) -> Response:
