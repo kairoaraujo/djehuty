@@ -28,12 +28,11 @@ import re
 from pathlib import Path
 
 # Legacy /v2 or /v3 paths not yet ported to djehuty.api. Keep each line
-# annotated with what it is so the backlog is self-documenting.
-KNOWN_GAPS: set[str] = {
-    # GET single dataset author; legacy api_v3_dataset_authors serves both
-    # /authors and /authors/<author_uuid> from one handler.
-    "/v3/datasets/{}/authors/{}",
-}
+# annotated with what it is so the backlog is self-documenting. Under the AS-IS
+# principle an entry here is a known behavioural gap (legacy serves the path,
+# the new API does not), so this set must reach empty before api-service:new is
+# a faithful drop-in replacement.
+KNOWN_GAPS: set[str] = set()
 
 
 def _normalize(path: str) -> str:

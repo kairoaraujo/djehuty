@@ -102,8 +102,9 @@ def git_set_default_branch(
     account=Depends(require_auth),
     db=Depends(get_db),
 ):
+    # AS-IS: setting the default branch is a write -> requires data_edit.
     repository = git_service.repository_by_dataset_id(
-        db, account["uuid"], dataset_id
+        db, account["uuid"], dataset_id, action="edit"
     )
     if repository is None:
         raise NotFoundError()

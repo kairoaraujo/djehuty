@@ -17,6 +17,7 @@ from djehuty.api.dependencies import (
     resolve_reviewer_context,
 )
 from djehuty.api.exceptions import NotFoundError, ForbiddenError, InvalidInputError
+from djehuty.api.permissions import enforce_collaborative_permissions
 
 router = APIRouter(tags=["Dataset Management"])
 
@@ -448,6 +449,9 @@ def decline_dataset(
 @router.get("/datasets/{dataset_id}/references", summary="List dataset references", tags=["Dataset Metadata"])
 def list_references(dataset_id: str, db=Depends(get_db), account: dict | None = Depends(get_current_account)):
     dataset = _resolve_any_dataset(db, dataset_id, account)
+    if account:
+        enforce_collaborative_permissions(
+            db, account["uuid"], dataset, "dataset", "metadata_read")
     refs = db.references(item_uri=dataset["uri"])
     return JSONResponse(content=[formatter.format_reference_record(r) for r in refs])
 
@@ -455,6 +459,8 @@ def list_references(dataset_id: str, db=Depends(get_db), account: dict | None = 
 @router.post("/datasets/{dataset_id}/references", summary="Add references", tags=["Dataset Metadata"])
 def add_references(dataset_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
     dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_read")
     new_refs = body.get("references", [])
     existing = db.references(item_uri=dataset["uri"], account_uuid=account["uuid"])
     existing_urls = [r.get("url", "") for r in existing]
@@ -467,6 +473,8 @@ def add_references(dataset_id: str, body: dict, account=Depends(require_auth), d
 def delete_reference(dataset_id: str, url: str = Query(..., max_length=1024), account=Depends(require_auth), db=Depends(get_db)):
     from requests.utils import unquote
     dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_read")
     decoded_url = unquote(url)
     existing = db.references(item_uri=dataset["uri"], account_uuid=account["uuid"])
     urls = [r.get("url", "") for r in existing]
@@ -479,6 +487,9 @@ def delete_reference(dataset_id: str, url: str = Query(..., max_length=1024), ac
 @router.get("/datasets/{dataset_id}/tags", summary="List dataset tags", tags=["Dataset Metadata"])
 def list_tags(dataset_id: str, db=Depends(get_db), account: dict | None = Depends(get_current_account)):
     dataset = _resolve_any_dataset(db, dataset_id, account)
+    if account:
+        enforce_collaborative_permissions(
+            db, account["uuid"], dataset, "dataset", "metadata_read")
     tags = db.tags(item_uri=dataset["uri"])
     return JSONResponse(content=[formatter.format_tag_record(t) for t in tags])
 
@@ -486,6 +497,8 @@ def list_tags(dataset_id: str, db=Depends(get_db), account: dict | None = Depend
 @router.post("/datasets/{dataset_id}/tags", summary="Add tags", tags=["Dataset Metadata"])
 def add_tags(dataset_id: str, body: dict, account=Depends(require_auth), db=Depends(get_db)):
     dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_read")
     new_tags = body.get("tags", [])
     existing = db.tags(item_uri=dataset["uri"], account_uuid=account["uuid"])
     existing_values = [formatter.format_tag_record(t) for t in existing]
@@ -498,6 +511,8 @@ def add_tags(dataset_id: str, body: dict, account=Depends(require_auth), db=Depe
 def delete_tag(dataset_id: str, tag: str = Query(..., max_length=1024), account=Depends(require_auth), db=Depends(get_db)):
     from requests.utils import unquote
     dataset = _resolve_dataset(db, dataset_id, account["uuid"])
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_read")
     decoded_tag = unquote(tag)
     existing = db.tags(item_uri=dataset["uri"], account_uuid=account["uuid"])
     tag_values = [formatter.format_tag_record(t) for t in existing]
@@ -577,6 +592,9 @@ async def upload_file(
 
     # Dataset ownership check (must be the owner's draft).
     dataset = _resolve_dataset(db, dataset_id, account_uuid)
+    # AS-IS: a collaborator needs data_edit to upload; owners no-op.
+    enforce_collaborative_permissions(
+        db, account_uuid, dataset, "dataset", "data_edit")
 
     # Strict-check pre-validation.
     if strict_check:
@@ -720,6 +738,9 @@ def list_collaborators(container_uuid: str, account=Depends(require_auth), db=De
     except (IndexError, AttributeError):
         raise NotFoundError()
 
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_read")
+
     collaborators = db.collaborators(
         dataset_uuid=dataset["uuid"], account_uuid=account["uuid"]
     )
@@ -736,6 +757,18 @@ def update_collaborator(
 ):
     if not isinstance(body, dict):
         raise InvalidInputError("Request body must be a JSON object.", "BadBody")
+    try:
+        dataset = db.datasets(
+            container_uuid=container_uuid,
+            account_uuid=account["uuid"],
+            is_published=None,
+            is_latest=None,
+            limit=1,
+        )[0]
+    except (IndexError, AttributeError):
+        raise NotFoundError()
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_edit")
     if not db.update_collaborator(
         container_uuid=container_uuid,
         collaborator_uuid=collaborator_uuid,
@@ -748,6 +781,18 @@ def update_collaborator(
 
 @router.delete("/datasets/{container_uuid}/collaborators/{collaborator_uuid}", summary="Remove collaborator", tags=["Collaborators"])
 def delete_collaborator(container_uuid: str, collaborator_uuid: str, account=Depends(require_auth), db=Depends(get_db)):
+    try:
+        dataset = db.datasets(
+            container_uuid=container_uuid,
+            account_uuid=account["uuid"],
+            is_published=None,
+            is_latest=None,
+            limit=1,
+        )[0]
+    except (IndexError, AttributeError):
+        raise NotFoundError()
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_edit")
     db.delete_collaborator(container_uuid=container_uuid, collaborator_uuid=collaborator_uuid)
     return Response(status_code=204)
 
@@ -778,6 +823,10 @@ def list_dataset_authors_v3(
     except (IndexError, AttributeError):
         raise NotFoundError()
 
+    # AS-IS: a collaborator (shared dataset) needs metadata_read; owners no-op.
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_read")
+
     authors = db.authors(
         item_uri=dataset["uri"],
         account_uuid=account["uuid"],
@@ -788,6 +837,53 @@ def list_dataset_authors_v3(
         order_direction=order_direction or "asc",
     )
     return JSONResponse(content=[formatter.format_author_record_v3(a) for a in authors])
+
+
+@router.get(
+    "/datasets/{container_uuid}/authors/{author_uuid}",
+    summary="Get a single dataset author (v3)",
+    tags=["Dataset Authors"],
+)
+def get_dataset_author_v3(
+    container_uuid: str,
+    author_uuid: str,
+    account=Depends(require_auth),
+    db=Depends(get_db),
+    order: str | None = Query(None, max_length=32),
+    order_direction: str | None = Query(None, pattern="^(asc|desc)$"),
+    limit: int | None = Query(None, ge=1, le=10000),
+):
+    from djehuty.web import validator
+
+    if not validator.is_valid_uuid(container_uuid):
+        raise NotFoundError()
+    try:
+        dataset = db.datasets(
+            container_uuid=container_uuid,
+            account_uuid=account["uuid"],
+            is_published=False,
+            is_latest=False,
+            limit=1,
+        )[0]
+    except (IndexError, AttributeError):
+        raise NotFoundError()
+
+    enforce_collaborative_permissions(
+        db, account["uuid"], dataset, "dataset", "metadata_read")
+
+    authors = db.authors(
+        item_uri=dataset["uri"],
+        account_uuid=account["uuid"],
+        author_uuid=author_uuid,
+        is_published=False,
+        item_type="dataset",
+        limit=limit,
+        order=order or "order_index",
+        order_direction=order_direction or "asc",
+    )
+    if not authors:
+        raise NotFoundError()
+    return JSONResponse(content=formatter.format_author_record_v3(authors[0]))
 
 
 @router.post("/datasets/{container_uuid}/reorder-authors", summary="Reorder authors", tags=["Dataset Authors"])

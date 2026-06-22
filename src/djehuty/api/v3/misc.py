@@ -13,6 +13,7 @@ from djehuty.web.config import config
 from djehuty.utils.convenience import parses_to_int
 from djehuty.api.dependencies import get_db, require_auth
 from djehuty.api.exceptions import InvalidInputError, NotFoundError, ForbiddenError
+from djehuty.api.permissions import enforce_collaborative_permissions
 
 router = APIRouter()
 
@@ -344,6 +345,9 @@ def get_file_details(
         metadata = records[0]
     except (IndexError, AttributeError, TypeError):
         raise NotFoundError()
+    # AS-IS: a collaborator needs data_read on the file; owners no-op.
+    enforce_collaborative_permissions(
+        db, account_uuid, metadata, "file", "data_read")
     try:
         metadata["base_url"] = config.base_url
         return JSONResponse(content=formatter.format_file_details_record(metadata))

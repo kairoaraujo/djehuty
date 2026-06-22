@@ -82,12 +82,13 @@ def set_default_branch(repository: "pygit2.Repository", branch_name: str) -> boo
         return False
 
 
-def repository_by_dataset_id(db, account_uuid: str, dataset_id) -> "pygit2.Repository | None":
+def repository_by_dataset_id(db, account_uuid: str, dataset_id, action: str = "read") -> "pygit2.Repository | None":
     """Resolve a dataset to its git repository (or ``None`` if unavailable).
 
     Returns ``None`` for any failure: dataset not found / not owned,
-    git repo directory missing, etc. The caller maps this to 404 like
-    the legacy handlers do.
+    insufficient collaborative ``data_{action}`` permission, git repo directory
+    missing, etc. The caller maps this to 404 like the legacy handlers do --
+    note legacy deliberately hides a git permission denial as 404, not 403.
     """
     from djehuty.utils.convenience import parses_to_int
 
@@ -109,6 +110,12 @@ def repository_by_dataset_id(db, account_uuid: str, dataset_id) -> "pygit2.Repos
         dataset = datasets[0]
     except (IndexError, AttributeError, TypeError):
         _log.error("No Git repository for dataset %s.", dataset_id)
+        return None
+
+    # AS-IS: a collaborator needs data_{action} (read/edit). On denial legacy
+    # returns None -- the caller renders 404, not 403. Owners are unaffected.
+    from djehuty.services.permissions import is_permitted
+    if not is_permitted(db, account_uuid, dataset, "dataset", f"data_{action}"):
         return None
 
     if "git_uuid" not in dataset:
