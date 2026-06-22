@@ -1407,10 +1407,13 @@ def main (config_file=None, run_internal_server=True, initialize=True,
                     ``web-service: legacy`` to disable the new stack entirely.
                     """
                     # Prefixes (startswith) served by the new FastAPI app.
-                    PREFIXES = ("/v2/", "/v3/", "/api/", "/saml/", "/theme/")
+                    PREFIXES = ("/v2/", "/v3/", "/api/", "/saml/", "/theme/",
+                                "/categories/", "/institutions/", "/authors/")
                     # Exact paths served by the new FastAPI app.
                     EXACT = ("/", "/login", "/logout", "/portal",
-                             "/robots.txt", "/sitemap.xml")
+                             "/robots.txt", "/sitemap.xml", "/browse",
+                             "/category", "/search", "/feedback",
+                             "/data_access_request", "/opendap_to_doi")
 
                     def __init__(self, legacy, api):
                         self.legacy = legacy
