@@ -5,22 +5,16 @@ Faithful AS-IS port of the legacy ``ui_login`` / ``ui_logout`` /
 redirect) are byte-for-byte faithful; the redirect targets (``/my/dashboard``,
 ``/my/sessions/.../activate``) stay legacy-served until the UI surface is ported.
 
-Error paths return the correct status codes with the JSON/plain bodies the
-legacy ``error_*`` helpers already serve to non-HTML clients. The full HTML
-error pages (403.html etc.) are intentionally deferred until the shared
-templating foundation lands with the UI surface -- see [[fastapi-migration]].
+Error paths go through the shared ``djehuty.views.errors`` helpers, which render
+the HTML error pages (403.html / 404.html) for HTML clients and fall back to
+JSON/plain for everyone else, exactly as legacy did.
 """
 
 import logging
 
 import requests
 from fastapi import APIRouter, Request, Depends
-from fastapi.responses import (
-    Response,
-    RedirectResponse,
-    JSONResponse,
-    PlainTextResponse,
-)
+from fastapi.responses import Response, RedirectResponse
 
 from djehuty.web.config import config
 from djehuty.api.dependencies import get_db
@@ -29,6 +23,7 @@ from djehuty.services import orcid as orcid_service
 from djehuty.services import sram as sram_service
 from djehuty.services import email as email_service
 from djehuty.services.content_negotiation import accepts_html, accepts_content_type, accepts_xml
+from djehuty.views import errors
 from djehuty.utils.convenience import value_or, value_or_none
 
 _log = logging.getLogger(__name__)
@@ -40,34 +35,6 @@ COOKIE_KEY = "djehuty_session"
 IMPERSONATOR_COOKIE_KEY = "impersonator_djehuty_session"
 
 
-# --- error responses (HTML pages deferred; see module docstring) -------------
-
-def _error_403(audit_log_message=None) -> Response:
-    if audit_log_message is not None:
-        _log.info(audit_log_message)
-    return JSONResponse(status_code=403, content={"message": "Not allowed."})
-
-
-def _error_404() -> Response:
-    return JSONResponse(status_code=404,
-                        content={"message": "This resource does not exist."})
-
-
-def _error_406(allowed_formats) -> Response:
-    return PlainTextResponse(f"Acceptable formats: {allowed_formats}", status_code=406)
-
-
-def _error_400(message, code) -> Response:
-    return JSONResponse(status_code=400, content={"message": message, "code": code})
-
-
-def _error_500(audit_log_message=None) -> Response:
-    if audit_log_message is None:
-        audit_log_message = "An unexpected error has occurred (HTTP 500)."
-    _log.error(audit_log_message)
-    return Response(content="", status_code=500)
-
-
 def _login_response(db, account_uuid, account) -> Response:
     """Create the session, set the cookie, and redirect -- faithful to legacy.
 
@@ -77,7 +44,7 @@ def _login_response(db, account_uuid, account) -> Response:
     """
     token, mfa_token, session_uuid = db.insert_session(account_uuid, name="Website login")
     if session_uuid is None:
-        return _error_500(f"Failed to create a session for account {account_uuid}.")
+        return errors.error_500(f"Failed to create a session for account {account_uuid}.")
 
     _log.info("Created session %s for account %s.", session_uuid, account_uuid)
 
@@ -115,7 +82,7 @@ async def ui_login(request: Request, db=Depends(get_db)):
     if config.automatic_login_email is not None and not config.in_production:
         account = db.account_by_email(config.automatic_login_email)
         if account is None:
-            return _error_403()
+            return errors.error_403(db, request)
         account_uuid = account["uuid"]
         _log.info("Account %s logged in via auto-login.", account_uuid)
 
@@ -128,10 +95,10 @@ async def ui_login(request: Request, db=Depends(get_db)):
             code = request.query_params.get("code")
         orcid_record = orcid_service.authenticate(code)
         if orcid_record is None:
-            return _error_403("Failed login attempt through ORCID.")
+            return errors.error_403(db, request, "Failed login attempt through ORCID.")
 
         if not accepts_html(accept):
-            return _error_406("text/html")
+            return errors.error_406("text/html")
 
         account_uuid = db.account_uuid_by_orcid(orcid_record['orcid'])
         if account_uuid is None:
@@ -145,10 +112,10 @@ async def ui_login(request: Request, db=Depends(get_db)):
                     orcid_id    = orcid_record['orcid']
                 )
                 if not account_uuid:
-                    return _error_403(f"Failed to create account for {orcid_record['orcid']}.")
+                    return errors.error_403(db, request, f"Failed to create account for {orcid_record['orcid']}.")
                 _log.info("Account %s created via ORCID.", account_uuid)
             except KeyError:
-                return _error_403("Received an unexpected record from ORCID.")
+                return errors.error_403(db, request, "Received an unexpected record from ORCID.")
         else:
             _log.info("Account %s logged in via ORCID.", account_uuid)
 
@@ -166,18 +133,18 @@ async def ui_login(request: Request, db=Depends(get_db)):
         ## Retrieve signed data from the IdP via the user.
         if request.method == "POST":
             if not accepts_html(accept):
-                return _error_406("text/html")
+                return errors.error_406("text/html")
 
             form = await request.form()
             http_fields = saml_service.request_to_saml_request(
                 request.url.path, dict(request.query_params), dict(form))
             saml_record = saml_service.authenticate(db, http_fields)
             if saml_record is None:
-                return _error_403("Failed to receive SAML record.")
+                return errors.error_403(db, request, "Failed to receive SAML record.")
 
             try:
                 if "email" not in saml_record:
-                    return _error_400("Invalid request", "MissingEmailProperty")
+                    return errors.error_400("Invalid request", "MissingEmailProperty")
 
                 account = db.account_by_email(saml_record["email"].lower())
                 if account:
@@ -225,7 +192,7 @@ async def ui_login(request: Request, db=Depends(get_db)):
                         domain      = value_or_none(saml_record, "domain")
                     )
                     if account_uuid is None:
-                        return _error_500(f"Creating account for {saml_record['email']} failed.")
+                        return errors.error_500(f"Creating account for {saml_record['email']} failed.")
                     _log.info("Account %s created via SAML.", account_uuid)
 
                 if (config.sram_collaboration_id is not None and
@@ -258,19 +225,19 @@ async def ui_login(request: Request, db=Depends(get_db)):
             except TypeError:
                 pass
     else:
-        return _error_500(f"Unknown identity provider '{config.identity_provider}'.")
+        return errors.error_500(f"Unknown identity provider '{config.identity_provider}'.")
 
     if account_uuid is not None:
         return _login_response(db, account_uuid, account)
 
-    return _error_500("Failed to complete the log in procedure for an unknown reason.")
+    return errors.error_500("Failed to complete the log in procedure for an unknown reason.")
 
 
 @router.get("/logout", summary="Log out", include_in_schema=False)
 def ui_logout(request: Request, db=Depends(get_db)):
     """Implements /logout."""
     if not accepts_html(request.headers.get("Accept")):
-        return _error_406("text/html")
+        return errors.error_406("text/html")
 
     # When impersonating, find the admin's token, and set it as the new
     # session token.
@@ -298,31 +265,31 @@ def ui_logout(request: Request, db=Depends(get_db)):
 
 
 @router.get("/saml/metadata", summary="SAML 2.0 SP metadata", include_in_schema=False)
-def saml_metadata(request: Request):
+def saml_metadata(request: Request, db=Depends(get_db)):
     """Communicates the service provider metadata for SAML 2.0."""
     accept = request.headers.get("Accept")
     if not (accepts_content_type(accept, "application/samlmetadata+xml", strict=False) or
             accepts_xml(accept)):
-        return _error_406("text/xml")
+        return errors.error_406("text/xml")
 
     if config.identity_provider != "saml":
-        return _error_404()
+        return errors.error_404(db, request)
 
     try:
         from xmlsec import Error as xmlsecError  # pylint: disable=import-outside-toplevel
     except (ImportError, ModuleNotFoundError):
-        return _error_500("SAML support is not available.")
+        return errors.error_500("SAML support is not available.")
 
     try:
         http_fields = saml_service.request_to_saml_request(
             request.url.path, dict(request.query_params), {})
-        metadata, errors = saml_service.sp_metadata(http_fields)
-        if len(errors) == 0:
+        metadata, validation_errors = saml_service.sp_metadata(http_fields)
+        if len(validation_errors) == 0:
             return Response(content=metadata, media_type="text/xml")
 
         _log.error("SAML SP Metadata validation failed.")
-        _log.error("Errors: %s", ", ".join(errors))
+        _log.error("Errors: %s", ", ".join(validation_errors))
     except xmlsecError as error:
         _log.error("SAML configuration error: %s", error)
 
-    return _error_500()
+    return errors.error_500()

@@ -76,9 +76,18 @@ class FakeDB:
         self.deleted_sessions.append(token)
         return True
 
-    # Required by get_current_account when other routes are mounted; unused here.
+    # Required by get_current_account when other routes are mounted, and by the
+    # shared error-page renderer when a client asks for HTML.
     def account_by_session_token(self, token):
         return None
+
+    def is_depositor(self, token, account=None):
+        return False
+
+    def __getattr__(self, name):
+        if name.startswith("may_"):
+            return lambda *a, **k: False
+        raise AttributeError(name)
 
 
 @pytest.fixture
@@ -113,6 +122,15 @@ def test_login_automatic_missing_account_is_403(auth_config, monkeypatch):
     db = FakeDB(account=None)
     resp = _client(db).get("/login")
     assert resp.status_code == 403
+
+
+def test_login_403_renders_html_for_browsers(auth_config, monkeypatch):
+    # A browser (Accept: text/html) gets the 403 HTML page, not JSON.
+    monkeypatch.setattr(config, "automatic_login_email", "ghost@example.org", raising=False)
+    resp = _client(FakeDB(account=None)).get("/login", headers={"Accept": "text/html"})
+    assert resp.status_code == 403
+    assert "text/html" in resp.headers["content-type"]
+    assert "<html" in resp.text
 
 
 def test_login_mfa_redirects_to_activation(auth_config, monkeypatch):

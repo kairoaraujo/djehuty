@@ -24,7 +24,7 @@ import pytest
 LEGACY_WSGI_MODULE = "djehuty.web.wsgi"
 
 # Every new package that must stay independent of the legacy WSGI app.
-NEW_PACKAGES = ("djehuty.api", "djehuty.auth", "djehuty.services")
+NEW_PACKAGES = ("djehuty.api", "djehuty.auth", "djehuty.views", "djehuty.services")
 
 
 def _api_python_files() -> list[Path]:
