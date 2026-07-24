@@ -4489,6 +4489,53 @@ class WebServer:
         else:
             self.__log_event (request, container_uuid, "dataset", "download")
 
+    def __s3_download_response (self, request, streamer, name):
+        """Builds a (possibly ranged) download response for an S3-backed file.
+
+        Honours the client's 'Range' header so interrupted downloads can be
+        resumed. The range logic lives in S3DownloadStreamer so other HTTP
+        stacks can reuse it.
+        """
+        disposition = f"filename*=UTF-8''{quote (name)}"
+
+        ## connect() reads headers only; the body streams lazily via iterator().
+        streamer.connect ()
+        total = streamer.total_length
+
+        requested = request.range if total > 0 else None
+        if requested is None or not requested.ranges:
+            response = self.response (streamer.iterator (),
+                                      mimetype="application/octet-stream")
+            if streamer.content_length > 0:
+                response.headers["Content-Length"] = streamer.content_length
+            response.headers["Accept-Ranges"] = "bytes"
+            response.headers["Content-disposition"] = disposition
+            return response
+
+        ## range_for_length normalises suffix (bytes=-N) and open (bytes=N-)
+        ## forms into a half-open (start, stop) tuple, or None if unsatisfiable.
+        range_tuple = requested.range_for_length (total)
+        if range_tuple is None:
+            streamer.close ()
+            response = self.response ("", mimetype="application/octet-stream")
+            response.status_code = 416
+            response.headers["Content-Range"] = f"bytes */{total}"
+            response.headers["Accept-Ranges"] = "bytes"
+            return response
+
+        start, stop = range_tuple
+        streamer.close ()
+        streamer.reset_range (offset=start, end=stop - 1)
+
+        response = self.response (streamer.iterator (),
+                                  mimetype="application/octet-stream")
+        response.status_code = 206
+        response.headers["Content-Range"] = f"bytes {start}-{stop - 1}/{total}"
+        response.headers["Content-Length"] = stop - start
+        response.headers["Accept-Ranges"] = "bytes"
+        response.headers["Content-disposition"] = disposition
+        return response
+
     def ui_download_file (self, request, dataset_id, file_id):
         """Implements /file/<id>/<fid>."""
         dataset, metadata = self.__accessible_files_for_dataset (request, dataset_id, file_id)
@@ -4518,13 +4565,7 @@ class WebServer:
 
             self.__log_download_event (request, dataset["container_uuid"])
             if isinstance (file_path, s3.S3DownloadStreamer):
-                file_path.connect ()
-                response = self.response (file_path.iterator(), mimetype="application/octet-stream")
-                filename = quote(metadata["name"])
-                if file_path.content_length > 0:
-                    response.headers["Content-Length"] = file_path.content_length
-                response.headers["Content-disposition"] = f"filename*=UTF-8''{filename}"
-                return response
+                return self.__s3_download_response (request, file_path, metadata["name"])
             return send_file (file_path,
                               request.environ,
                               "application/octet-stream",
