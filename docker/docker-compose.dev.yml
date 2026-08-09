@@ -21,6 +21,23 @@ services:
       retries: 30
       start_period: 30s
 
+  postgres:
+    image: postgres:17
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: "djehuty"
+      POSTGRES_PASSWORD: "djehuty"
+      POSTGRES_DB: "djehuty_stats"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U djehuty -d djehuty_stats"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
   djehuty:
     build:
       context: ..
@@ -32,12 +49,15 @@ services:
     # The image's default CMD runs `djehuty web --initialize` against this.
     environment:
       DJEHUTY_CONFIG: ${DJEHUTY_CONFIG:-/config/djehuty/djehuty-dev-config.json}
+      DJEHUTY_STATS_DB_URL: ${DJEHUTY_STATS_DB_URL:-postgresql+psycopg://djehuty:djehuty@postgres:5432/djehuty_stats}
     volumes:
       - ../src:/app/src
       - ../etc:/config:ro
       - djehuty-data:/data
     depends_on:
       virtuoso:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/ > /dev/null"]
@@ -49,3 +69,4 @@ services:
 volumes:
   virtuoso-data:
   djehuty-data:
+  postgres-data:

@@ -25,6 +25,9 @@ dependencies    = [
     "pydantic>=2.0",
     "a2wsgi>=1.10.0",
     "python-multipart>=0.0.9",
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
 ]
 classifiers     = [
     "Programming Language :: Python :: 3",
@@ -43,9 +46,10 @@ djehuty = "djehuty.ui:main"
 
 # Ship all bundled resources
 [tool.setuptools.package-data]
-"djehuty.web"    = ["resources/**"]
-"djehuty.backup" = ["resources/**"]
-"djehuty.schema" = ["migrations/**"]
+"djehuty.web"                = ["resources/**"]
+"djehuty.backup"             = ["resources/**"]
+"djehuty.schema"             = ["migrations/**"]
+"djehuty.services.statistics" = ["alembic.ini", "migrations/**"]
 
 [dependency-groups]
 docs = [
