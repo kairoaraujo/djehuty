@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import sys
+import time
 from datetime import datetime
 
 from defusedxml import ElementTree
@@ -824,7 +825,25 @@ def setup_usage_statistics (server, logger):
             flush_interval=config.usage_statistics_flush_interval,
             flush_batch_size=config.usage_statistics_flush_batch_size,
             logger=logger)
-        service.migrate ()
+
+        # The database may still be initializing at start up (for example a
+        # fresh PostgreSQL container), so retry the first connection a few times
+        # before giving up and falling back to the RDF store.
+        last_error = None
+        for attempt in range (1, 11):
+            try:
+                service.migrate ()
+                last_error = None
+                break
+            except Exception as error:  # pylint: disable=broad-except
+                last_error = error
+                logger.info ("Waiting for the usage-statistics database "
+                             "(attempt %d/10): %s", attempt, error)
+                time.sleep (3)
+
+        if last_error is not None:
+            raise last_error
+
         service.start ()
         server.db.statistics_service = service
         logger.info ("Usage statistics: using SQL store.")
@@ -1419,7 +1438,10 @@ def main (config_file=None, run_internal_server=True, initialize=True,
         if perform_export:
             return perform_rdf_export (logger, server, full_rdf_export)
 
-        if not inside_reload:
+        # Run in the request-serving process: the reloader's child (where
+        # WERKZEUG_RUN_MAIN is set) or the single process when the reloader is
+        # off. Never in the reloader's watcher parent, which does not serve.
+        if inside_reload or not config.use_reloader:
             setup_usage_statistics (server, logger)
 
         config.djehuty_version = importlib.metadata.version("djehuty")
@@ -1601,3 +1623,5 @@ def application (env, start_response):
         _UWSGI_APP = build_wsgi_app (server, server.db,
                                      config.web_service, config.web_service_groups)
     return _UWSGI_APP (env, start_response)
+
+# reload trigger 1786357048

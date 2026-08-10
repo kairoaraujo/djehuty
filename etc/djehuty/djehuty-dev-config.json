@@ -57,6 +57,12 @@
       "sparql-update-uri": "http://virtuoso:8890/sparql",
       "state-graph": "djehuty://local"
     },
+    "usage-statistics": {
+      "enabled": "1",
+      "database": "${env:DJEHUTY_STATS_DB_URL}",
+      "flush-interval": "2",
+      "flush-batch-size": "10"
+    },
     "authentication": {
       "automatic-login-email": "dev@djehuty.com"
     },

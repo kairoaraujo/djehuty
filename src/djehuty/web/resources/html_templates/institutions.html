@@ -4,7 +4,7 @@
 var group_ids = "{% for item in sub_groups: %}{{item.group_id}}{{ ',' if not loop.last else '' }}{% endfor %}";
 </script>
 <script src="/static/js/jquery-3.6.0.min.js"></script>
-<script src="/static/js/ranking.js?cache=1742461855"></script>
+<script src="/static/js/ranking.js?cache=1786352979"></script>
 {% endblock %}
 {% block body %}
 <h1>{{group.group_name}}</h1>
@@ -16,6 +16,13 @@ var group_ids = "{% for item in sub_groups: %}{{item.group_id}}{{ ',' if not loo
     <li class="top-views"><a href="#">Views</a>
     <li class="top-shares"><a href="#">Shares</a>
     <li class="top-cites"><a href="#">Citations</a>
+  </ul>
+</div>
+<div id="top-period" class="tabs corporate-identity">
+  <ul>
+    <li class="period-all active"><a href="#">All time</a>
+    <li class="period-last_month"><a href="#">Last month</a>
+    <li class="period-last_week"><a href="#">Last week</a>
   </ul>
 </div>
 <div id="top-datasets-wrapper" class="corporate-identity-border">
