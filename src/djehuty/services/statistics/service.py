@@ -13,15 +13,17 @@ import threading
 from djehuty.services.statistics.buffer import UsageEventBuffer
 from djehuty.services.statistics.engine import create_statistics_engine
 from djehuty.services.statistics.migrate import upgrade_to_head
+from djehuty.services.statistics.store import StatisticsStore
 
 
 class StatisticsService:
-    """Ingest side of the SQL usage statistics store."""
+    """Ingest and read side of the SQL usage statistics store."""
 
     def __init__(self, database_url, flush_interval=5, flush_batch_size=1000, logger=None):
         self._log = logger or logging.getLogger(__name__)
         self._engine = create_statistics_engine(database_url)
         self._buffer = UsageEventBuffer(self._engine, flush_batch_size, self._log)
+        self._store = StatisticsStore(self._engine)
         self._flush_interval = max(1, int(flush_interval))
         self._stop = threading.Event()
         self._timer = None
@@ -35,6 +37,11 @@ class StatisticsService:
     def buffer(self):
         """The ingest buffer."""
         return self._buffer
+
+    @property
+    def store(self):
+        """The read-side query interface."""
+        return self._store
 
     def migrate(self):
         """Bring the statistics schema up to head."""
@@ -61,6 +68,10 @@ class StatisticsService:
     def record(self, created_date, ip_address, item_uuid, item_type, event_type):
         """Buffer a usage event for later batched insertion."""
         return self._buffer.add(created_date, ip_address, item_uuid, item_type, event_type)
+
+    def flush(self):
+        """Flush buffered events so subsequent reads see them."""
+        return self._buffer.flush()
 
     def stop(self):
         """Stop the flush loop and flush any remaining events."""

@@ -1,0 +1,28 @@
+{% extends "prefixes.sparql" %}
+{% block query %}
+SELECT DISTINCT ?container_uuid ?dataset_id ?title ?figshare_url
+WHERE {
+  GRAPH <{{state_graph}}> {
+    ?container      rdf:type                      djht:DatasetContainer .
+    ?container      djht:latest_published_version ?dataset .
+
+    ?dataset        djht:title                    ?title .
+
+    # dataset_id and figshare_url are absent on native (non-Figshare) datasets,
+    # so they must be optional or those datasets drop out of the statistics.
+    OPTIONAL { ?container djht:dataset_id     ?dataset_id . }
+    OPTIONAL { ?dataset   djht:figshare_url   ?figshare_url . }
+
+    {%- if category_ids is not none %}
+    ?dataset        djht:categories/rdf:rest*/rdf:first ?category .
+    ?category       djht:id                       ?category_id .
+    {%- endif %}
+    {%- if group_ids is not none %}
+    ?dataset        djht:group_id                 ?group_id .
+    {%- endif %}
+
+    BIND(STRAFTER(STR(?container), "container:") AS ?container_uuid)
+{%- if filters is not none %}{{ filters | safe }}{% endif %}
+  }
+}
+{% endblock %}

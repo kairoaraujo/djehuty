@@ -550,14 +550,97 @@ class SparqlInterface:
 
         return row
 
+    def __dataset_metadata_for_statistics (self, container_uuids=None,
+                                           group_ids=None, category_ids=None):
+        """Return {container_uuid: {dataset_id, title, figshare_url}} from the RDF store.
+
+        When CONTAINER_UUIDS is given, the result is limited to those containers.
+        When GROUP_IDS or CATEGORY_IDS is given, the result is limited to
+        containers whose latest published version matches the filter.
+        """
+        filters = ""
+        if container_uuids is not None:
+            if not container_uuids:
+                return {}
+            # Match on the container URI rather than the STRAFTER-derived string,
+            # so the comparison does not depend on literal datatypes.
+            container_uris = [rdf.uuid_to_uri (uuid, "container") for uuid in container_uuids]
+            filters += rdf.sparql_in_filter ("container", container_uris, is_uri=True)
+        filters += rdf.sparql_in_filter ("group_id", group_ids)
+        filters += rdf.sparql_in_filter ("category_id", category_ids)
+
+        query = self.__query_from_template ("dataset_metadata_for_statistics", {
+            "group_ids":    group_ids,
+            "category_ids": category_ids,
+            "filters":      filters
+        })
+        rows = self.__run_query (query, query, "statistics")
+        return {row["container_uuid"]: row for row in rows}
+
+    def __dataset_statistics_from_sql (self, item_type, limit, offset,
+                                       group_ids=None, category_ids=None,
+                                       date_from=None, date_to=None):
+        """Serve dataset statistics from the SQL store, enriched with RDF metadata."""
+        event_type = self.__statistics_event_type (item_type)
+        self.statistics_service.flush ()
+        store = self.statistics_service.store
+
+        if group_ids or category_ids:
+            # Filter to the matching containers in the RDF store first, then rank
+            # them by their SQL counts. Paging is applied after ranking.
+            metadata = self.__dataset_metadata_for_statistics (
+                group_ids=group_ids, category_ids=category_ids)
+            counts = {
+                uuid: store.count_for_item (uuid, event_type, date_from, date_to)
+                for uuid in metadata
+            }
+            pairs = sorted (counts.items(), key=lambda item: (-item[1], item[0]))
+            start = offset or 0
+            pairs = pairs[start:start + limit] if limit is not None else pairs[start:]
+        else:
+            pairs = store.counts_by_item (
+                event_type, date_from=date_from, date_to=date_to,
+                limit=limit, offset=offset)
+            metadata = self.__dataset_metadata_for_statistics (
+                container_uuids=[uuid for uuid, _ in pairs])
+
+        results = []
+        for container_uuid, count in pairs:
+            meta = metadata.get (container_uuid)
+            if meta is None:
+                continue
+            results.append ({
+                "container_uuid": container_uuid,
+                "dataset_id":     meta.get ("dataset_id"),
+                "title":          meta.get ("title"),
+                "figshare_url":   meta.get ("figshare_url"),
+                item_type:        count,
+            })
+        return results
+
+    @staticmethod
+    def __statistics_event_type (item_type):
+        """Map the API item_type (plural metric) to the stored event_type."""
+        return {"downloads": "download", "views": "view"}.get (item_type, item_type)
+
     def dataset_statistics (self, item_type="downloads",
                                   order="downloads",
                                   order_direction="desc",
                                   group_ids=None,
                                   category_ids=None,
                                   limit=10,
-                                  offset=0):
+                                  offset=0,
+                                  date_from=None,
+                                  date_to=None):
         """Procedure to retrieve dataset statistics."""
+
+        # When the SQL usage-statistics store is enabled, counts come from SQL
+        # and are enriched with dataset metadata from the RDF store. Group and
+        # category filters are resolved against the RDF store first.
+        if self.statistics_service is not None:
+            return self.__dataset_statistics_from_sql (item_type, limit, offset,
+                                                       group_ids, category_ids,
+                                                       date_from, date_to)
 
         prefix  = item_type.capitalize()
         filters = ""
@@ -575,6 +658,21 @@ class SparqlInterface:
         query += rdf.sparql_suffix (order, order_direction, limit, offset)
         return self.__run_query (query, query, "statistics")
 
+    def __dataset_statistics_timeline_from_sql (self, dataset_id, item_type):
+        """Serve a single dataset's timeline from the SQL store."""
+        container_uuid = self.container_uuid_by_id (dataset_id)
+        if container_uuid is None:
+            return []
+
+        event_type = self.__statistics_event_type (item_type)
+        self.statistics_service.flush ()
+        rows = self.statistics_service.store.timeline_for_item (container_uuid, event_type)
+        return [{
+            "dataset_id": dataset_id,
+            "date":       month,
+            item_type:    count,
+        } for _uuid, month, count in rows]
+
     def dataset_statistics_timeline (self,
                                      dataset_id=None,
                                      item_type="downloads",
@@ -584,6 +682,12 @@ class SparqlInterface:
                                      limit=10,
                                      offset=0):
         """Procedure to retrieve dataset statistics per date."""
+
+        # The SQL path serves a single dataset's timeline (the common case).
+        # Cross-dataset timelines and category filters stay on the RDF path.
+        if (self.statistics_service is not None and dataset_id is not None
+                and not category_ids):
+            return self.__dataset_statistics_timeline_from_sql (dataset_id, item_type)
 
         item_class  = item_type.capitalize()
         filters = ""
