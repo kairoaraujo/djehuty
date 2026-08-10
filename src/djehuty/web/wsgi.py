@@ -4273,6 +4273,13 @@ class WebServer:
                     show_iiif_link = True
                     break
 
+        # When the SQL usage-statistics store is enabled, the RDF counters are no
+        # longer maintained; overlay the totals from the SQL store.
+        sql_statistics = self.db.item_statistics (dataset["container_uuid"], "dataset")
+        if sql_statistics is not None:
+            dataset["total_views"]     = sql_statistics["views"]
+            dataset["total_downloads"] = sql_statistics["downloads"]
+
         statistics    = {
             "views"  : value_or(dataset, "total_views",  0),
             "shares" : value_or(dataset, "total_shares", 0),
@@ -4349,6 +4356,7 @@ class WebServer:
                                        id_version = id_version,
                                        opendap=opendap,
                                        statistics=statistics,
+                                       statistics_periods=(self.db.statistics_service is not None),
                                        git_repository_url=git_repository_url,
                                        posted_date=posted_date,
                                        private_view=private_view,

@@ -72,14 +72,23 @@
         </div>
 {%- endif %}
 {%- if statistics %}
-        <div id="usage">
+        <div id="usage" data-container-uuid="{{item.container_uuid}}">
             <h3 class="label">Usage statistics</h3>
     {%- for metric in statistics %}
             <div class="metric">
-                <div class="number">{{statistics[metric]}}</div>
+                <div class="number" data-metric="{{metric}}">{{statistics[metric]}}</div>
                 {{metric.replace("cites", "citations")}}
             </div>
     {%- endfor %}
+    {%- if statistics_periods %}
+            <div id="usage-period" class="tabs corporate-identity">
+              <ul>
+                <li class="period-all active"><a href="#">All time</a>
+                <li class="period-last_month"><a href="#">Last month</a>
+                <li class="period-last_week"><a href="#">Last week</a>
+              </ul>
+            </div>
+    {%- endif %}
         </div>
 {%- endif %}
         <div id="categories">
