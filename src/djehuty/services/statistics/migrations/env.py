@@ -4,9 +4,6 @@ The database URL is not taken from alembic.ini. It is provided by the caller,
 either through the ``-x db_url=...`` command line option or the
 ``DJEHUTY_STATS_DB_URL`` environment variable, so the same djehuty
 configuration drives both the application and the migrations.
-
-Phase 0 wires the environment only; the first migration is added in a later
-phase.
 """
 
 import os
@@ -14,11 +11,9 @@ import os
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-config = context.config
+from djehuty.services.statistics.schema import metadata as target_metadata
 
-# Target metadata is added together with the schema in a later phase. Keeping
-# it None here means autogenerate is not used yet; migrations are hand written.
-target_metadata = None
+config = context.config
 
 
 def _database_url() -> str:
