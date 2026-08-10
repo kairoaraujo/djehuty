@@ -74,6 +74,15 @@
     <sparql-update-uri>http://localhost:8890/sparql</sparql-update-uri>
     <state-graph>djehuty://local</state-graph>
   </rdf-store>
+  <!-- Optional SQL usage-statistics store. When enabled, view/download
+       statistics are recorded in the SQL database instead of the RDF store.
+       The database value accepts ${env:NAME} and ${file:/path} references in
+       the JSON configuration format. -->
+  <usage-statistics enabled="0">
+    <database></database>
+    <flush-interval>5</flush-interval>
+    <flush-batch-size>1000</flush-batch-size>
+  </usage-statistics>
   <datacite>
     <api-url>https://api.datacite.org</api-url>
     <repository-id><!-- Repository ID received from DataCite. --></repository-id>

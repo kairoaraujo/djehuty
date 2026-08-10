@@ -246,6 +246,54 @@ def read_web_service_configuration (xml_root, logger):
         config.web_service_groups.update (_read_web_service_targets (groups_node, logger))
 
 
+def read_usage_statistics_configuration (xml_root, logger):
+    """Read the optional SQL usage-statistics store configuration.
+
+    Accepts a block that works in both XML and JSON:
+
+        <usage-statistics enabled="1">
+          <database>postgresql+psycopg://user:pass@host:5432/djehuty_stats</database>
+          <flush-interval>5</flush-interval>
+          <flush-batch-size>1000</flush-batch-size>
+        </usage-statistics>
+
+    When absent or disabled, djehuty keeps recording statistics in the RDF store.
+    The database value passes through the secret-reference resolver, so
+    ${env:NAME} and ${file:/path} are supported.
+    """
+    node = xml_root.find ("usage-statistics")
+    if node is None:
+        return
+
+    # "enabled" is an attribute in XML and a scalar key in JSON; node.get reads
+    # both. Default to disabled when the attribute is missing or malformed.
+    try:
+        config.usage_statistics_enabled = bool (int (node.get ("enabled", "0")))
+    except (ValueError, TypeError):
+        logger.error ("Erroneous value for 'usage-statistics/enabled' - assuming disabled.")
+        config.usage_statistics_enabled = False
+
+    database = config_value (node, "database", None, None)
+    if database is not None:
+        config.usage_statistics_database_url = database
+
+    try:
+        interval = config_value (node, "flush-interval", None, None)
+        if interval is not None:
+            config.usage_statistics_flush_interval = int (interval)
+    except (ValueError, TypeError):
+        logger.error ("Erroneous value for 'usage-statistics/flush-interval' - "
+                      "assuming '%s'.", config.usage_statistics_flush_interval)
+
+    try:
+        batch_size = config_value (node, "flush-batch-size", None, None)
+        if batch_size is not None:
+            config.usage_statistics_flush_batch_size = int (batch_size)
+    except (ValueError, TypeError):
+        logger.error ("Erroneous value for 'usage-statistics/flush-batch-size' - "
+                      "assuming '%s'.", config.usage_statistics_flush_batch_size)
+
+
 def read_quotas_configuration (xml_root):
     """Read quota information from XML_ROOT."""
 
@@ -869,6 +917,8 @@ def read_configuration_file (server, config_file, logger, config_files):
 
         config.delay_inserting_log_entries = read_boolean_value (xml_root, "delay-inserting-log-entries",
                                                                  config.delay_inserting_log_entries, logger)
+
+        read_usage_statistics_configuration (xml_root, logger)
 
         ssi_psk = config_value (xml_root, "ssi-psk")
         if ssi_psk is not None:

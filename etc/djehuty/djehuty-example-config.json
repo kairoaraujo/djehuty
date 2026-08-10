@@ -57,6 +57,12 @@
       "sparql-update-uri": "http://localhost:8890/sparql",
       "state-graph": "djehuty://local"
     },
+    "usage-statistics": {
+      "enabled": "0",
+      "database": "",
+      "flush-interval": "5",
+      "flush-batch-size": "1000"
+    },
     "datacite": {
       "api-url": "https://api.datacite.org",
       "repository-id": "",
