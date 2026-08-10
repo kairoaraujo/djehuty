@@ -7,8 +7,19 @@ from djehuty.api.dependencies import get_db
 from djehuty.api.exceptions import InvalidInputError
 from djehuty.api.models.common import ErrorResponse
 from djehuty.api.v3._shared import _ok
+from djehuty.services.statistics.period import resolve_period
 
 router = APIRouter(tags=["V3 / Statistics"])
+
+
+def _period_from_args(args):
+    """Resolve (date_from, date_to) from period / from / to query parameters."""
+    return resolve_period(
+        period=args.get("period"),
+        date_from=args.get("from"),
+        date_to=args.get("to"),
+    )
+
 
 _TOP_EXAMPLE = [
     {
@@ -93,6 +104,7 @@ def datasets_top(item_type: str, request: Request, db=Depends(get_db)):
         for index, _ in enumerate(record["group_ids"]):
             record["group_ids"][index] = validator.integer_value(record["group_ids"], index)
 
+    date_from, date_to = _period_from_args(args)
     records = db.dataset_statistics(
         limit=limit,
         offset=offset,
@@ -101,6 +113,8 @@ def datasets_top(item_type: str, request: Request, db=Depends(get_db)):
         group_ids=record["group_ids"],
         category_ids=record["categories"],
         item_type=item_type,
+        date_from=date_from,
+        date_to=date_to,
     )
     return JSONResponse(content=records)
 
@@ -121,6 +135,7 @@ def datasets_timeline(item_type: str, request: Request, db=Depends(get_db)):
     except validator.ValidationException as error:
         raise InvalidInputError(error.message, error.code) from error
 
+    date_from, date_to = _period_from_args(request.query_params)
     records = db.dataset_statistics_timeline(
         dataset_id=record["dataset_id"],
         limit=record["limit"],
@@ -129,5 +144,44 @@ def datasets_timeline(item_type: str, request: Request, db=Depends(get_db)):
         order_direction=record["order_direction"],
         category_ids=record["categories"],
         item_type=item_type,
+        date_from=date_from,
+        date_to=date_to,
     )
     return JSONResponse(content=records)
+
+
+_COUNT_EXAMPLE = {
+    "container_uuid": "27e6a01d-3f09-4d90-ae02-1d749ae9efb8",
+    "views": 214,
+    "downloads": 42,
+}
+
+
+@router.get(
+    "/datasets/{dataset_id}/statistics",
+    summary="Get view and download counts for one dataset",
+    responses={
+        200: _ok("View and download counts for the dataset", _COUNT_EXAMPLE),
+        400: {"model": ErrorResponse, "description": "Invalid parameters"},
+        404: {"model": ErrorResponse, "description": "Dataset not found"},
+    },
+)
+def dataset_statistics_counts(dataset_id: str, request: Request, db=Depends(get_db)):
+    from djehuty.api.exceptions import NotFoundError
+    from djehuty.web import validator
+
+    container_uuid = db.container_uuid_by_id(dataset_id)
+    if container_uuid is None or not validator.is_valid_uuid(container_uuid):
+        raise NotFoundError()
+
+    date_from, date_to = _period_from_args(request.query_params)
+    counts = db.item_statistics(container_uuid, "dataset", date_from, date_to)
+    if counts is None:
+        # The SQL store is not enabled; fall back to the container's counters.
+        container = db.container(container_uuid, "dataset")
+        counts = {
+            "views": (container or {}).get("total_views", 0),
+            "downloads": (container or {}).get("total_downloads", 0),
+        }
+
+    return JSONResponse(content={"container_uuid": container_uuid, **counts})

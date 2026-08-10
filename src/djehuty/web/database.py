@@ -658,7 +658,8 @@ class SparqlInterface:
         query += rdf.sparql_suffix (order, order_direction, limit, offset)
         return self.__run_query (query, query, "statistics")
 
-    def __dataset_statistics_timeline_from_sql (self, dataset_id, item_type):
+    def __dataset_statistics_timeline_from_sql (self, dataset_id, item_type,
+                                                date_from=None, date_to=None):
         """Serve a single dataset's timeline from the SQL store."""
         container_uuid = self.container_uuid_by_id (dataset_id)
         if container_uuid is None:
@@ -666,7 +667,8 @@ class SparqlInterface:
 
         event_type = self.__statistics_event_type (item_type)
         self.statistics_service.flush ()
-        rows = self.statistics_service.store.timeline_for_item (container_uuid, event_type)
+        rows = self.statistics_service.store.timeline_for_item (
+            container_uuid, event_type, date_from=date_from, date_to=date_to)
         return [{
             "dataset_id": dataset_id,
             "date":       month,
@@ -680,14 +682,17 @@ class SparqlInterface:
                                      order_direction="desc",
                                      category_ids=None,
                                      limit=10,
-                                     offset=0):
+                                     offset=0,
+                                     date_from=None,
+                                     date_to=None):
         """Procedure to retrieve dataset statistics per date."""
 
         # The SQL path serves a single dataset's timeline (the common case).
         # Cross-dataset timelines and category filters stay on the RDF path.
         if (self.statistics_service is not None and dataset_id is not None
                 and not category_ids):
-            return self.__dataset_statistics_timeline_from_sql (dataset_id, item_type)
+            return self.__dataset_statistics_timeline_from_sql (
+                dataset_id, item_type, date_from, date_to)
 
         item_class  = item_type.capitalize()
         filters = ""
@@ -705,6 +710,25 @@ class SparqlInterface:
         order = "dataset_id" if order is None else order
         query += rdf.sparql_suffix (order, order_direction, limit, offset)
         return self.__run_query (query, query, "statistics")
+
+    def item_statistics (self, container_uuid, item_type="dataset",
+                         date_from=None, date_to=None):
+        """Return {views, downloads} for one container from the SQL store.
+
+        Only available when the SQL usage-statistics store is enabled; returns
+        None otherwise so callers can fall back to the RDF counters.
+        """
+        if self.statistics_service is None:
+            return None
+
+        self.statistics_service.flush ()
+        store = self.statistics_service.store
+        return {
+            "views":     store.count_for_item (container_uuid, "view",
+                                               date_from, date_to),
+            "downloads": store.count_for_item (container_uuid, "download",
+                                               date_from, date_to),
+        }
 
     def container_uuid_by_id (self, identifier, item_type="dataset"):
         """Procedure to retrieve container_uuid from Figshare id if necessary"""
@@ -736,11 +760,22 @@ class SparqlInterface:
 
         try:
             if use_cache:
-                return self.__run_query (query, query, "container")[0]
-            return self.__run_query (query)[0]
+                record = self.__run_query (query, query, "container")[0]
+            else:
+                record = self.__run_query (query)[0]
         except (TypeError, IndexError):
             self.log.error ("Retrieving container for %s failed.", container_uuid)
             return None
+
+        # When the SQL usage-statistics store is enabled, the RDF counters are no
+        # longer maintained; overlay the shallow totals from the SQL store.
+        if self.statistics_service is not None:
+            counts = self.item_statistics (container_uuid, item_type)
+            if counts is not None:
+                record["total_views"]     = counts["views"]
+                record["total_downloads"] = counts["downloads"]
+
+        return record
 
     def authors (self, first_name=None, full_name=None, group_id=None,
                  author_id=None, institution_id=None, is_active=None,

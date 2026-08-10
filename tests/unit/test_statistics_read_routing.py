@@ -32,6 +32,8 @@ def db(tmp_path):
                  "item_type": "dataset", "event_type": "download"},
                 {"created_at": _dt(2026, 6, 1), "ip_address": None, "item_uuid": "uuid-a",
                  "item_type": "dataset", "event_type": "download"},
+                {"created_at": _dt(2026, 6, 2), "ip_address": None, "item_uuid": "uuid-a",
+                 "item_type": "dataset", "event_type": "view"},
                 {"created_at": _dt(2026, 6, 2), "ip_address": None, "item_uuid": "uuid-b",
                  "item_type": "dataset", "event_type": "download"},
             ],
@@ -120,3 +122,40 @@ def test_timeline_without_dataset_id_falls_back_to_rdf(db, monkeypatch):
     monkeypatch.setattr(db, "_SparqlInterface__query_from_template", lambda *a, **k: "QUERY")
     db.dataset_statistics_timeline(dataset_id=None, item_type="downloads")
     assert called.get("ran") is True
+
+
+def test_item_statistics_returns_view_and_download_counts(db):
+    counts = db.item_statistics("uuid-a", "dataset")
+    assert counts == {"views": 1, "downloads": 2}
+
+
+def test_item_statistics_with_period(db):
+    counts = db.item_statistics("uuid-a", "dataset", date_from=_dt(2026, 6, 1))
+    assert counts == {"views": 1, "downloads": 1}
+
+
+def test_item_statistics_none_when_sql_disabled():
+    plain = SparqlInterface()
+    assert plain.item_statistics("uuid-a", "dataset") is None
+
+
+def test_container_overlays_sql_counts(db, monkeypatch):
+    # container() reads metadata from the RDF store; the totals are then
+    # overlaid from the SQL store.
+    monkeypatch.setattr(
+        db, "_SparqlInterface__run_query",
+        lambda *a, **k: [{"container_uuid": "uuid-a", "total_views": 999,
+                          "total_downloads": 999}],
+    )
+    monkeypatch.setattr(db, "_SparqlInterface__query_from_template", lambda *a, **k: "QUERY")
+    record = db.container("uuid-a", "dataset")
+    assert record["total_views"] == 1
+    assert record["total_downloads"] == 2
+
+
+def test_timeline_with_period(db, monkeypatch):
+    monkeypatch.setattr(db, "container_uuid_by_id", lambda ident, item_type="dataset": "uuid-a")
+    result = db.dataset_statistics_timeline(
+        dataset_id=101, item_type="downloads", date_from=_dt(2026, 6, 1)
+    )
+    assert result == [{"dataset_id": 101, "date": "2026-06", "downloads": 1}]

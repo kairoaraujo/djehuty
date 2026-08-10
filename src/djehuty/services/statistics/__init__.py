@@ -20,6 +20,7 @@ from djehuty.services.statistics.engine import (
     reset_engine,
 )
 from djehuty.services.statistics.migrate import upgrade_to_head
+from djehuty.services.statistics.period import resolve_period
 from djehuty.services.statistics.schema import log_events, metadata
 from djehuty.services.statistics.service import StatisticsService
 from djehuty.services.statistics.store import StatisticsStore
@@ -31,6 +32,7 @@ __all__ = [
     "create_statistics_engine",
     "get_engine",
     "reset_engine",
+    "resolve_period",
     "upgrade_to_head",
     "log_events",
     "metadata",
