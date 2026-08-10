@@ -82,6 +82,60 @@ When a query cannot be executed, the command stops, allowing to fix or remove
 the query to-be-replayed. Invoking `--apply-transactions` a second time will
 continue replaying where the previous run stopped.
 
+## Usage statistics
+
+Usage statistics (views, downloads and git clones) can be recorded in a
+dedicated SQL database instead of the RDF store. On deployments with a high
+volume of access this avoids writing one triple per event to the RDF store,
+which is expensive and slows the store down. When the SQL store is enabled,
+usage statistics are recorded and served entirely from SQL, and the RDF store
+holds no statistics.
+
+The SQL store is configured in the `usage-statistics` node:
+
+```json
+"usage-statistics": {
+  "enabled": "1",
+  "database": "${env:DJEHUTY_STATS_DB_URL}",
+  "flush-interval": "5",
+  "flush-batch-size": "1000"
+}
+```
+
+```xml
+<!-- or, with the deprecated XML format: -->
+<usage-statistics enabled="1">
+  <database>${env:DJEHUTY_STATS_DB_URL}</database>
+  <flush-interval>5</flush-interval>
+  <flush-batch-size>1000</flush-batch-size>
+</usage-statistics>
+```
+
+| Option | Description |
+|--------|-------------|
+| `enabled` | When set to 1, usage statistics are recorded in the SQL database. When 0 or absent, statistics are recorded in the RDF store as before. |
+| `database` | A SQLAlchemy database URL. PostgreSQL is recommended for production, for example `postgresql+psycopg://user:password@host:5432/djehuty_stats`. SQLite is supported for development, for example `sqlite:////data/stats.db`. The value accepts the `${env:NAME}` and `${file:/path}` references. |
+| `flush-interval` | How often, in seconds, buffered events are written to the database. |
+| `flush-batch-size` | How many events are buffered before they are written in a single batch. |
+
+Events are buffered in each process and written to the shared database in
+batches, so many processes (for example several Kubernetes pods) can record
+statistics against one database without per-request write load. The schema is
+created and kept up to date automatically at start up. Aggregates such as
+per-dataset totals and timelines are computed at query time, so there is no
+separate roll-up step to run.
+
+The SQL store starts empty. To keep historical numbers, import them directly
+into the `log_events` table from a database export or from access logs, outside
+`djehuty`. The `log_events` table has the columns `id`, `created_at`,
+`ip_address`, `item_uuid` (the dataset or collection container UUID),
+`item_type` (`dataset` or `collection`) and `event_type` (one of `view`,
+`privateView`, `download`, `reviewerDownload`, `gitDownload`).
+
+The `delay-inserting-log-entries` option and the query-audit-log replay of log
+entries are superseded by the SQL store and are deprecated. They remain
+available as a fallback when the SQL store is not configured.
+
 ## Configuring storage
 
 Storage locations can be configured with the `storage` node. When configuring
