@@ -48,6 +48,9 @@ class SparqlInterface:
         self.sparql       = None
         self.sparql_is_up = False
         self.store        = None
+        # Set when the SQL usage-statistics store is enabled; log events are then
+        # buffered here instead of being written to the RDF store.
+        self.statistics_service = None
 
     def setup_sparql_endpoint (self):
         """Procedure to be called after setting the 'endpoint' members."""
@@ -1848,6 +1851,12 @@ class SparqlInterface:
         if not isinstance (event_type, str):
             self.log.error ("Invalid event_type passed to 'insert_log_entry'.")
             return False
+
+        # When the SQL usage-statistics store is enabled, buffer the event for
+        # batched insertion instead of writing a triple to the RDF store.
+        if self.statistics_service is not None:
+            return self.statistics_service.record (created_date, ip_address,
+                                                   item_uuid, item_type, event_type)
 
         graph       = Graph()
         entry_uri   = rdf.unique_node ("log-entry")

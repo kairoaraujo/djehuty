@@ -802,6 +802,37 @@ def read_orcid_configuration (xml_root):
         if config.identity_provider != "saml":
             config.identity_provider   = "orcid"
 
+def setup_usage_statistics (server, logger):
+    """Attach the SQL usage-statistics service to the database when enabled.
+
+    When ``usage-statistics`` is enabled in the configuration, log events are
+    buffered in a SQL database instead of the RDF store. This brings the schema
+    up to head and starts the periodic flush. A no-op when disabled.
+    """
+    if not config.usage_statistics_enabled:
+        return
+
+    if not config.usage_statistics_database_url:
+        logger.error ("usage-statistics is enabled but no database URL is set; "
+                      "keeping statistics in the RDF store.")
+        return
+
+    try:
+        from djehuty.services.statistics import StatisticsService
+        service = StatisticsService (
+            config.usage_statistics_database_url,
+            flush_interval=config.usage_statistics_flush_interval,
+            flush_batch_size=config.usage_statistics_flush_batch_size,
+            logger=logger)
+        service.migrate ()
+        service.start ()
+        server.db.statistics_service = service
+        logger.info ("Usage statistics: using SQL store.")
+    except Exception as error:  # pylint: disable=broad-except
+        logger.error ("Failed to set up the SQL usage-statistics store (%s); "
+                      "keeping statistics in the RDF store.", error)
+
+
 def read_email_configuration (server, xml_root, logger):
     """Procedure to parse and set the email server configuration."""
     # Share the mail sender with the HTTP API's email service.
@@ -1387,6 +1418,9 @@ def main (config_file=None, run_internal_server=True, initialize=True,
 
         if perform_export:
             return perform_rdf_export (logger, server, full_rdf_export)
+
+        if not inside_reload:
+            setup_usage_statistics (server, logger)
 
         config.djehuty_version = importlib.metadata.version("djehuty")
 

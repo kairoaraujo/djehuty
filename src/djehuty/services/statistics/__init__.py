@@ -13,6 +13,7 @@ design-docs/usage-statistics-sql-store.md and
 design-docs/usage-statistics-implementation-plan.md for the design.
 """
 
+from djehuty.services.statistics.buffer import UsageEventBuffer
 from djehuty.services.statistics.engine import (
     create_statistics_engine,
     get_engine,
@@ -20,8 +21,11 @@ from djehuty.services.statistics.engine import (
 )
 from djehuty.services.statistics.migrate import upgrade_to_head
 from djehuty.services.statistics.schema import log_events, metadata
+from djehuty.services.statistics.service import StatisticsService
 
 __all__ = [
+    "StatisticsService",
+    "UsageEventBuffer",
     "create_statistics_engine",
     "get_engine",
     "reset_engine",
